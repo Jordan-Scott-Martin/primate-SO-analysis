@@ -3,7 +3,7 @@
 ############################################################
 
 #expand memory if necessary
-memory.limit(10000)
+memory.limit(100000)
 
 #set directory
 setwd(" ")
@@ -17,8 +17,11 @@ library(ggplot2)
 library(cowplot)
 library(RColorBrewer)
 
+#set path for cmdstan installation (optional)
+cmdstanr::set_cmdstan_path(" ")
+
 #MCMC settings
-n_iter <- 3000
+n_iter <- 2000
 n_warm <- 1000
 n_chains <- 4
 
@@ -37,12 +40,12 @@ dataGR$phylo = dataGR$Genus_species
 library(ape)
 trees = read.nexus("vert phylo.nex")
 
+#directory for results (saving all 
+#brms and stan models requires GBs of memory)
+setwd(" ")
+
 #create consensus phylogeny
 c_tree = phytools::consensus.edges(trees, method="mean.edge", if.absent="zero")
-
-#directory for results (saving brms and stan models 
-#will take GBs of memory)
-setwd(" ")
 
 ############################################################
 #Save image of phylogeny
@@ -306,9 +309,9 @@ m.re1 = brm(formula = SO_m + IVSO_m + set_rescor(FALSE),
 
 #model formula
 SO_m = bf(SO_counts | trials(SO_tot) ~ 
-            1 + effort + (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
+            1 + effort_wf + (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
 IVSO_m = bf(IVSOint | trials(SO_tot) ~ 
-            1 + effort + (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
+            1 + effort_wf + (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
 
 #create copy of dataframe for manipulation
 df1 = dataGR
@@ -329,8 +332,11 @@ df1$FFMM[is.na(df1$FFMM)] = 0
 df1$SO_counts = with(df1, cbind(Solitary, MF, MFF, FMM, FFMM))
 df1$SO_tot = with(df1, Solitary + MF + MFF + FMM + FFMM)
 df1$obs = seq(1:nrow(df1))
-df1$effort =
-  as.vector(scale(log(df1$Nbr_papers_for_each_field_sites)))
+df1$effort = as.vector(scale(log(df1$Nbr_papers_for_each_field_sites)))
+f_mean = aggregate(Nbr_papers_for_each_field_sites ~ superfamily, mean, data = df1)
+rownames(f_mean) = f_mean$superfamily
+df1$effort_bf = as.vector(scale(f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
+df1$effort_wf = as.vector(scale(df1$Nbr_papers_for_each_field_sites - f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
 
 #create data lists
 datal = rep(list(df1),5)
@@ -341,6 +347,7 @@ phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
               list(A = phylol[[5]]))
 
 #estimate model
+#remove backend code line if cmdstan is not installed
 m.superf = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
           family = c(multinomial, binomial),
           data = datal, data2 = phylol,
@@ -351,35 +358,36 @@ m.superf = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE),
                     paste0(text="prior(\"exponential(2)\", 
                     class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
                     levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
-          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
-          control=list(adapt_delta=0.99, max_treedepth=10))
+          backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+          control=list(adapt_delta=0.95, max_treedepth=10))
 
 #save
 saveRDS(m.superf, "m_superf.RDS")
 m.superf = readRDS("m_superf.RDS")
 
-#summary of superfamily predictions
+#plot predictions
 names = unique(cbind(df1$Genus_species, df1$superfamily))
-
-pred = fitted(m.superf, newdata = data.frame(phylo = names[,1], superfamily = names[,2], SO_tot = 1),
-              re_formula = ~ (1|superfamily) + (1|gr(phylo, cov = A)), robust = FALSE)
-
-pred = fitted(m.superf, newdata = data.frame(phylo = names[,1], Genus_species = names[,1], superfamily = names[,2], SO_tot = 1),
-              re_formula = ~ (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species), summary = FALSE)
+pred = fitted(m.superf, newdata = data.frame(phylo = names[,1], Genus_species = names[,1], 
+                                             superfamily = names[,2], SO_tot = 1, effort_wf = 1),
+              re_formula = ~ (1|superfamily) + (1|gr(phylo, cov = A)), summary = FALSE)
 
 w.sf = reshape2::melt(pred)
-w.sf$sf = rep(names[,2], each = 8000)
+w.sf$sf = rep(names[,2], each = 20000)
+levels(w.sf$Var3)[levels(w.sf$Var3)=="IVSOint"] = "Overall IVSO"
+w.sf[is.na(w.sf$Var3),"Var3"] = "Overall IVSO"
+
 
 library(tidybayes)
 superf.p =
 ggplot(w.sf, aes(x = value, y = sf, color = sf))+
   facet_wrap(.~ Var3)+
-  stat_pointinterval(.width = c(0.9), size = 2.5)+
+  stat_pointinterval(.width = c(0.5, 0.9))+
   stat_pointinterval(w.sf, mapping = aes(x = value, y = sf, group = Var2, color = sf),
                      .width=0, position = position_jitter(), alpha = 0.2, size = 1)+
   scale_color_manual(values = c("#0A2F51","#0E4D64","#137177","#188977","#1D9A6C","#39A96B"))+
   ylab(" ")+
-  xlab("Probability of SO for an average social unit")+
+  xlab("\nProbability for a social unit within an ancestral population")+
   theme(legend.position = "top",
           legend.title = element_blank(),
           legend.key = element_rect(fill = "white"),
@@ -396,7 +404,128 @@ ggplot(w.sf, aes(x = value, y = sf, color = sf))+
   guides( color = "none")
 
 #save
-save_plot("superfamily_pred.png", superf.p, base_height = 5.5, base_width = 7.5)
+save_plot("superfamily_fig 4.png", superf.p, base_height = 5, base_width = 8)
+save_plot("superfamily_fig 4.tiff", superf.p, base_height = 5, base_width = 8,
+          compression = "lzw")
+
+##############################################################
+#Phylogenetic correlations (no ecological effects)
+##############################################################
+
+#model formula
+SO_m = bf(SO_counts | trials(SO_tot) ~ 
+            1 + effort_wf + (1|superfamily) + (1|c|gr(phylo, cov = A)) + (1|c2|Genus_species) + (1|obs) )
+IVSO_m = bf(IVSOint | trials(SO_tot) ~ 
+              1 + effort_wf + (1|superfamily) + (1|c|gr(phylo, cov = A)) + (1|c2|Genus_species) + (1|obs) )
+
+#create copy of dataframe for manipulation
+df1 = dataGR
+
+#random phylo tree
+tree = trees[[sample(1:length(trees),1)]]
+A = vcv(tree, corr = TRUE)
+
+#sort population rows to match species-level phylogeny
+df1 = df1[order(match(df1$Genus_species, rownames(A))),]
+
+#prep response and predictor variables
+df1$Solitary[is.na(df1$Solitary)] = 0
+df1$MF[is.na(df1$MF)] = 0
+df1$MFF[is.na(df1$MFF)] = 0
+df1$FMM[is.na(df1$FMM)] = 0
+df1$FFMM[is.na(df1$FFMM)] = 0
+df1$SO_counts = with(df1, cbind(Solitary, MF, MFF, FMM, FFMM))
+df1$SO_tot = with(df1, Solitary + MF + MFF + FMM + FFMM)
+df1$obs = seq(1:nrow(df1))
+df1$effort = as.vector(scale(log(df1$Nbr_papers_for_each_field_sites)))
+f_mean = aggregate(Nbr_papers_for_each_field_sites ~ superfamily, mean, data = df1)
+rownames(f_mean) = f_mean$superfamily
+df1$effort_bf = as.vector(scale(f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
+df1$effort_wf = as.vector(scale(df1$Nbr_papers_for_each_field_sites - f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
+
+#create data lists
+datal = rep(list(df1),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
+
+#estimate model (running this x5 takes a long time depending on hardware)
+#remove backend code line if cmdstan is not installed
+m.cor = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+                        family = c(multinomial, binomial),
+                        data = datal, data2 = phylol,
+                        prior = c(prior("normal(0,1)", class = "Intercept"),
+                                  prior("normal(0,1)", class = "b"),
+                                  prior("lkj(2)", class = "cor"),
+                                  prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                                  eval(parse(text=paste0("c(", 
+                                  paste0(text="prior(\"exponential(2)\", 
+                                  class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                                  levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+                        backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+                        warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+                        control=list(adapt_delta=0.95, max_treedepth=10))
+#save
+saveRDS(m.cor, "m_cor.RDS")
+m.cor = readRDS("m_cor.RDS")
+
+#summarize
+re = VarCorr(m.cor, summary = FALSE)
+str(re$phylo$cor)
+
+#MF
+median(re$phylo$cor[,"muMF_SOcounts_Intercept","muMFF_SOcounts_Intercept"])
+sum(re$phylo$cor[,"muMF_SOcounts_Intercept","muMFF_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$phylo$cor[,"muMF_SOcounts_Intercept","muFMM_SOcounts_Intercept"])
+sum(re$phylo$cor[,"muMF_SOcounts_Intercept","muFMM_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$phylo$cor[,"muMF_SOcounts_Intercept","muFFMM_SOcounts_Intercept"])
+sum(re$phylo$cor[,"muMF_SOcounts_Intercept","muFFMM_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$phylo$cor[,"muMF_SOcounts_Intercept","IVSOint_Intercept"])
+sum(re$phylo$cor[,"muMF_SOcounts_Intercept","IVSOint_Intercept"] > 0)/nrow(re$phylo$cor)
+#residual
+median(re$Genus_species$cor[,"muMF_SOcounts_Intercept","muMFF_SOcounts_Intercept"])
+sum(re$Genus_species$cor[,"muMF_SOcounts_Intercept","muMFF_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$Genus_species$cor[,"muMF_SOcounts_Intercept","muFMM_SOcounts_Intercept"])
+sum(re$Genus_species$cor[,"muMF_SOcounts_Intercept","muFMM_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$Genus_species$cor[,"muMF_SOcounts_Intercept","muFFMM_SOcounts_Intercept"])
+sum(re$Genus_species$cor[,"muMF_SOcounts_Intercept","muFFMM_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$Genus_species$cor[,"muMF_SOcounts_Intercept","IVSOint_Intercept"])
+sum(re$Genus_species$cor[,"muMF_SOcounts_Intercept","IVSOint_Intercept"] > 0)/nrow(re$phylo$cor)
+
+#MFF
+median(re$phylo$cor[,"muMFF_SOcounts_Intercept","muFMM_SOcounts_Intercept"])
+sum(re$phylo$cor[,"muMFF_SOcounts_Intercept","muFMM_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$phylo$cor[,"muMFF_SOcounts_Intercept","muFFMM_SOcounts_Intercept"])
+sum(re$phylo$cor[,"muMFF_SOcounts_Intercept","muFFMM_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$phylo$cor[,"muMFF_SOcounts_Intercept","IVSOint_Intercept"])
+sum(re$phylo$cor[,"muMFF_SOcounts_Intercept","IVSOint_Intercept"] > 0)/nrow(re$phylo$cor)
+#residual
+median(re$Genus_species$cor[,"muMFF_SOcounts_Intercept","muFMM_SOcounts_Intercept"])
+sum(re$Genus_species$cor[,"muMFF_SOcounts_Intercept","muFMM_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$Genus_species$cor[,"muMFF_SOcounts_Intercept","muFFMM_SOcounts_Intercept"])
+sum(re$Genus_species$cor[,"muMFF_SOcounts_Intercept","muFFMM_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$Genus_species$cor[,"muMFF_SOcounts_Intercept","IVSOint_Intercept"])
+sum(re$Genus_species$cor[,"muMF_SOcounts_Intercept","IVSOint_Intercept"] > 0)/nrow(re$phylo$cor)
+
+#FMM
+median(re$phylo$cor[,"muFMM_SOcounts_Intercept","muFFMM_SOcounts_Intercept"])
+sum(re$phylo$cor[,"muFMM_SOcounts_Intercept","muFFMM_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$phylo$cor[,"muFMM_SOcounts_Intercept","IVSOint_Intercept"])
+sum(re$phylo$cor[,"muFMM_SOcounts_Intercept","IVSOint_Intercept"] > 0)/nrow(re$phylo$cor)
+#residual
+median(re$Genus_species$cor[,"muFMM_SOcounts_Intercept","muFFMM_SOcounts_Intercept"])
+sum(re$Genus_species$cor[,"muFMM_SOcounts_Intercept","muFFMM_SOcounts_Intercept"] > 0)/nrow(re$phylo$cor)
+median(re$Genus_species$cor[,"muFMM_SOcounts_Intercept","IVSOint_Intercept"])
+sum(re$Genus_species$cor[,"muFMM_SOcounts_Intercept","IVSOint_Intercept"] > 0)/nrow(re$phylo$cor)
+
+#FFMM
+median(re$phylo$cor[,"muFFMM_SOcounts_Intercept","IVSOint_Intercept"])
+sum(re$phylo$cor[,"muFFMM_SOcounts_Intercept","IVSOint_Intercept"] > 0)/nrow(re$phylo$cor)
+#residual
+median(re$Genus_species$cor[,"muFFMM_SOcounts_Intercept","IVSOint_Intercept"])
+sum(re$Genus_species$cor[,"muFFMM_SOcounts_Intercept","IVSOint_Intercept"] > 0)/nrow(re$phylo$cor)
 
 ############################################################
 #Ancestral state reconstruction (MULTINOMIAL)
@@ -404,34 +533,23 @@ save_plot("superfamily_pred.png", superf.p, base_height = 5.5, base_width = 7.5)
 
 #model formula
 SO_m = bf(SO_counts | trials(SO_tot) ~ 
-            1 + Activity_pattern + Locom + logmean_bodysize + effort + 
+            1 + Activity_pattern + Locom + logmean_bodysize + effort_wf +
             (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
-IVSO_m = bf(IVSOint | trials(SO_tot) ~ 1 +
-              Activity_pattern + Locom +
-              logmean_bodysize + effort + (1|superfamily) +
-              (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
+IVSO_m = bf(IVSOint | trials(SO_tot) ~
+            1 + Activity_pattern + Locom +  logmean_bodysize + effort_wf +
+            (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
 
-#data prep (1 of 10 possible datasets)
-df1 = df_10[[1]]
+#create copy of dataframe for manipulation
+df1 = dataGR
 
-#prepare vcv matrix
-A = vcv(c_tree, corr = TRUE)
+#random phylo tree
+tree = trees[[sample(1:length(trees),1)]]
+A = vcv(tree, corr = TRUE)
 
 #sort population rows to match species-level phylogeny
 df1 = df1[order(match(df1$Genus_species, rownames(A))),]
 
-#organize predictors
-df1$effort = as.vector(scale(log(df1$Nbr_papers_for_each_field_sites)))
-df1$Activity_pattern = ifelse(df1$Activity_pattern == "Cathemeral_Diurnal_Nocturnal", "Cathemeral",
-                              ifelse(df1$Activity_pattern == "Cathemeral_Diurnal", "Cathemeral", 
-                                     df1$Activity_pattern))
-df1$Activity_pattern = relevel(as.factor(df1$Activity_pattern), ref = "Nocturnal")
-df1$Locomotion = as.factor(df1$Locomotion)
-df1$Locom = (ifelse(df1$Locomotion == " ", NA, as.character(df1$Locomotion)))
-df1$logmean_bodysize = 
-  as.vector(scale(log( 1 + apply(cbind(df1$mean_Male_all,df1$mean_Female_all,df1$mean_other_all),
-                                 1, mean, na.rm = TRUE) )))
-
+#prep response and predictor variables
 df1$Solitary[is.na(df1$Solitary)] = 0
 df1$MF[is.na(df1$MF)] = 0
 df1$MFF[is.na(df1$MFF)] = 0
@@ -441,32 +559,58 @@ df1$SO_counts = with(df1, cbind(Solitary, MF, MFF, FMM, FFMM))
 df1$SO_tot = with(df1, Solitary + MF + MFF + FMM + FFMM)
 df1$obs = seq(1:nrow(df1))
 
+df1$effort = as.vector(scale(log(df1$Nbr_papers_for_each_field_sites)))
+f_mean = aggregate(Nbr_papers_for_each_field_sites ~ superfamily, mean, data = df1)
+rownames(f_mean) = f_mean$superfamily
+df1$effort_bf = as.vector(scale(f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
+df1$effort_wf = as.vector(scale(df1$Nbr_papers_for_each_field_sites - 
+                                  f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
+df1$Activity_pattern = ifelse(df1$Activity_pattern == "Cathemeral_Diurnal_Nocturnal", "Cathemeral",
+                              ifelse(df1$Activity_pattern == "Cathemeral_Diurnal", "Cathemeral", 
+                                     df1$Activity_pattern))
+df1$Activity_pattern = relevel(as.factor(df1$Activity_pattern), ref = "Nocturnal")
+df1$Locomotion = as.factor(df1$Locomotion)
+df1$Locom = (ifelse(df1$Locomotion == " ", NA, as.character(df1$Locomotion)))
+df1$logmean_bodysize = 
+  as.vector(scale(log( 1 + apply(cbind(df1$mean_Male_all,df1$mean_Female_all,df1$mean_other_all),
+                                 1, mean, na.rm = TRUE) )))
+#create data lists
+datal = rep(list(df1),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
+
 #estimate model
-m.asr = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-          data = df1, data2 = list(A = A),
+m.asr = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+          family = c(multinomial, binomial),
+          data = datal, data2 = phylol,
           prior = c(prior("normal(0,1)", class = "Intercept"),
-                    prior("normal(0,1)", class = "b"), 
+                    prior("normal(0,1)", class = "b"),
                     prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                    eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
+                    eval(parse(text=paste0("c(", 
+                    paste0(text="prior(\"exponential(2)\", 
                     class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
-                    levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
-          control=list(adapt_delta=0.99, max_treedepth=12))
+                    levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+          backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+          control=list(adapt_delta=0.95, max_treedepth=10))
 
 #save
 saveRDS(m.asr, "m_asr.RDS")
 m.asr = readRDS("m_asr.RDS")
 
 #summary of ASR predictions
-pred = fitted(m.asr, newdata = data.frame(effort = 0, SO_tot = 1, Nbr_social_units = 1, Activity_pattern = "Nocturnal",
-                                        Locom = "AR", logmean_bodysize = -1.5), re_formula = NA, robust = FALSE)
+pred = fitted(m.asr, newdata = data.frame(effort_wf = 0, SO_tot = 1, Nbr_social_units = 1, Activity_pattern = "Nocturnal",
+                                        Locom = "AR", logmean_bodysize = -2), re_formula = NA, robust = FALSE)
 N10_ASRpred = data.frame(pred = names(pred[,"Estimate",]), median = pred[,"Estimate",], sd = pred[,"Est.Error",])
 N10_ASRpred[,2:3] = round(N10_ASRpred[,2:3], 2)
 N10_ASRpred
 
-pred = data.frame( fitted(m.asr, newdata = data.frame(effort = 0, SO_tot = 1, Nbr_social_units = 1, Activity_pattern = "Nocturnal",
-                                                      Locom = "AR", logmean_bodysize = -1.5),
-                          re_formula = NA, robust = FALSE, summary=FALSE))
+pred = data.frame( fitted(m.asr, newdata = data.frame(effort_wf = 0, SO_tot = 1, Nbr_social_units = 1, 
+                                                      Activity_pattern = "Nocturnal", Locom = "AR", logmean_bodysize = -2),
+                                                      re_formula = NA, robust = FALSE, summary=FALSE))
 
 colnames(pred) = c("Solitary", "MF", "MFF", "FMM", "FFMM", "IVSOint")
 
@@ -500,9 +644,9 @@ median(IVSO); quantile(IVSO, c(0.25, 0.95))
 ############################################################
 #plot results
 pred = data.frame( fitted(m.asr, newdata = 
-                          data.frame(effort = 0, SO_tot = 1, 
+                          data.frame(effort_wf = 0, SO_tot = 1, 
                                      Activity_pattern = "Nocturnal",
-                                     Locom = "AR", logmean_bodysize = -1.5), 
+                                     Locom = "AR", logmean_bodysize = -2), 
                           re_formula = NA, robust = TRUE,summary = FALSE))
 
 colnames(pred) = c("Solitary", "MF", "MFF", "FMM", "FFMM", "Overall IVSO")
@@ -517,6 +661,7 @@ library(ggplot2)
 library(tidybayes)
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 pred.med = data.frame(med = apply(pred, 2, median), key = factor(colnames(pred), 
                   levels = c("Solitary","MF", "MFF", "FMM", "FFMM", "Overall IVSO")))
@@ -525,7 +670,7 @@ asr.primary =
   ggplot(data = lnd1, aes(x = value, color = key, fill = key, group = key))+
   geom_density(alpha = 0.25, aes(x = value, y = ..scaled..), size = 1)+
   geom_vline(data = pred.med, aes(xintercept = med, group = key), linetype = "dashed")+
-  facet_wrap(. ~ key, nrow = 1)+
+  facet_wrap(. ~ key, nrow = 2, scales ="free")+
   scale_x_continuous(limits=c(0,1), expand = c(0.02,0), labels = c("0", "0.25", "0.5", "0.75", "1") )+
   coord_cartesian(xlim=c(0,1))+
   scale_color_manual(values = colors[1:6]) +
@@ -549,24 +694,97 @@ asr.primary =
             guide_legend(nrow = 1, override.aes=list(color=NA)))
 
 
-ggsave("asr_p.png", asr.primary, width = 10, height = 3)
-
-#asr.p = plot_grid(asr.primary, asr.ivso, align = "hv", nrow = 1)
-#asr.p2 = ggdraw(add_sub(asr.p, "\nProbability in an ancestral population", fontface = "bold", size = 12, 
-#                        vpadding=grid::unit(0,"lines"),y=5, x=0.55, vjust=4.5))
-#ggsave("asr_p2.pdf", asr.p2, width = 9, height = 4)
-#ggsave("asr_p2.png", asr.p2, width = 9, height = 4)
-#ggsave("asr_p1.png", asr.primary, width = 4, height = 2.5)
-
-#saveRDS(asr.p2, "asr_p2.RDS")
-#asr.p2 = readRDS("asr_p2.RDS")
-
+ggsave("asr_p.png", asr.primary, width = 7.5, height = 6)
+ggsave("asr_p.tiff", asr.primary, width = 7.5, height = 6, compression = "lzw")
 
 ############################################################
-#Compare ecological inference between datasets (G and R)
+#Compare body size effect between datasets (G and R)
 ############################################################
 
-...
+#model formula (compare body size and diet effects)
+SO_m = bf(SO_counts | trials(SO_tot) ~ 
+            1 + logmean_bodysize  + 
+            (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
+IVSO_m = bf(IVSOint | trials(SO_tot) ~ 
+              1 + logmean_bodysize + 
+              (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
+
+#use consensus phylogeny (+ computational efficiency)
+tree = phytools::consensus.edges(trees, method="mean.edge", if.absent="zero")
+A = vcv(tree, corr = TRUE)
+
+#create copy of dataframe for manipulation
+df1 = dataG
+df2 = dataR
+
+#sort rows to match species-level phylogeny
+df1 = df1[order(match(df1$Genus_species, rownames(A))),]
+df2 = df2[order(match(df2$Genus_species, rownames(A))),]
+
+#prep response and predictor variables
+df1$Solitary[is.na(df1$Solitary)] = 0
+df1$MF[is.na(df1$MF)] = 0
+df1$MFF[is.na(df1$MFF)] = 0
+df1$FMM[is.na(df1$FMM)] = 0
+df1$FFMM[is.na(df1$FFMM)] = 0
+df1$SO_counts = with(df1, cbind(Solitary, MF, MFF, FMM, FFMM))
+df1$SO_tot = with(df1, Solitary + MF + MFF + FMM + FFMM)
+df1$obs = seq(1:nrow(df1))
+df1$logmean_bodysize = 
+  as.vector(scale(log( 1 + apply(cbind(df1$mean_Male_Galan,df1$mean_Female_Galan,
+                                       df1$mean_other_Galan),1, mean, na.rm = TRUE) )))
+df2$Solitary[is.na(df2$Solitary)] = 0
+df2$MF[is.na(df2$MF)] = 0
+df2$MFF[is.na(df2$MFF)] = 0
+df2$FMM[is.na(df2$FMM)] = 0
+df2$FFMM[is.na(df2$FFMM)] = 0
+df2$SO_counts = with(df2, cbind(Solitary, MF, MFF, FMM, FFMM))
+df2$SO_tot = with(df2, Solitary + MF + MFF + FMM + FFMM)
+df2$obs = seq(1:nrow(df2))
+df2$logmean_bodysize = 
+  as.vector(scale(log( 1 + apply(cbind(df2$mean_Male_Rowe,df2$mean_Female_Rowe,
+                                       df2$mean_other_Rowe),1, mean, na.rm = TRUE) )))
+
+#estimate model
+m.G = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+                     family = c(multinomial, binomial),
+                     data = df1, data2 = list(A = A),
+                     prior = c(prior("normal(0,1)", class = "Intercept"),
+                               prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                               eval(parse(text=paste0("c(", 
+                              paste0(text="prior(\"exponential(2)\", 
+                              class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                              levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+                     backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+                     warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+                     control=list(adapt_delta=0.95, max_treedepth=10))
+
+m.R = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+          family = c(multinomial, binomial),
+          data = df2, data2 = list(A = A),
+          prior = c(prior("normal(0,1)", class = "Intercept"),
+                    prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                    eval(parse(text=paste0("c(", 
+                    paste0(text="prior(\"exponential(2)\", 
+                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                    levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+          backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+          control=list(adapt_delta=0.99, max_treedepth=10))
+
+#save
+saveRDS(m.G, "m_G.RDS")
+saveRDS(m.R, "m_R.RDS")
+
+#compare body size effect
+post1 = posterior_samples(m.G)
+post2 = posterior_samples(m.R)
+
+#compare distributions
+diff_b = post1[ , grepl( "b_" , colnames( post1 ) ) ] -
+          post2[ , grepl( "b_" , colnames( post2 ) ) ]
+apply(diff_b, 2, median)
+apply(diff_b, 2, quantile, c(0.05, 0.95))
 
 ############################################################
 #Collective ecological effects (multivariate)
@@ -582,24 +800,42 @@ SO_m = bf(SO_counts | trials(SO_tot) ~
             mo(Habitat_heterogenity) + Habitat_cat + 
             foraging_style + Locom + Activity_pattern +
             fruitprop + folivprop + seedprop + animalprop +
-            logmean_bodysize + effort + (1|superfamily) + 
+            logmean_bodysize + effort_wf + (1|superfamily) + 
             (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
 
 IVSO_m = bf(IVSOint | trials(Nbr_social_units) ~ 1 +
              mo(Habitat_heterogenity) + Habitat_cat + 
              foraging_style + Locom + Activity_pattern + 
              fruitprop + folivprop + seedprop + animalprop +
-             logmean_bodysize + effort + (1|superfamily) + 
+             logmean_bodysize + effort_wf + (1|superfamily) + 
              (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
 
-#data prep
-df1 = df_10[[1]]
-#prepare vcv matrix
-A = vcv(c_tree, corr = TRUE)
+#create copy of dataframe for manipulation
+df1 = dataGR
+
+#random phylo tree
+tree = trees[[sample(1:length(trees),1)]]
+A = vcv(tree, corr = TRUE)
+
 #sort population rows to match species-level phylogeny
 df1 = df1[order(match(df1$Genus_species, rownames(A))),]
-#organize predictors
+
+#prep response and predictor variables
+df1$Solitary[is.na(df1$Solitary)] = 0
+df1$MF[is.na(df1$MF)] = 0
+df1$MFF[is.na(df1$MFF)] = 0
+df1$FMM[is.na(df1$FMM)] = 0
+df1$FFMM[is.na(df1$FFMM)] = 0
+df1$SO_counts = with(df1, cbind(Solitary, MF, MFF, FMM, FFMM))
+df1$SO_tot = with(df1, Solitary + MF + MFF + FMM + FFMM)
+df1$obs = seq(1:nrow(df1))
+
 df1$effort = as.vector(scale(log(df1$Nbr_papers_for_each_field_sites)))
+f_mean = aggregate(Nbr_papers_for_each_field_sites ~ superfamily, mean, data = df1)
+rownames(f_mean) = f_mean$superfamily
+df1$effort_bf = as.vector(scale(f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
+df1$effort_wf = as.vector(scale(df1$Nbr_papers_for_each_field_sites - 
+                                  f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
 df1$Activity_pattern = ifelse(df1$Activity_pattern == "Cathemeral_Diurnal_Nocturnal", "Cathemeral",
                               ifelse(df1$Activity_pattern == "Cathemeral_Diurnal", "Cathemeral", 
                                      df1$Activity_pattern))
@@ -610,7 +846,6 @@ df1$Locom = as.factor(df1$Locom)
 df1$logmean_bodysize = 
   as.vector(scale(log( 1 + apply(cbind(df1$mean_Male_all,df1$mean_Female_all,df1$mean_other_all),
                                  1, mean, na.rm = TRUE) )))
-
 df1$foraging_style = ifelse(df1$foraging_style == "one", "solitary",
                             ifelse(df1$foraging_style == "unknown", NA,
                                    ifelse(df1$foraging_style == " ", NA,
@@ -621,141 +856,177 @@ df1$folivprop = df1$mean_Leaves_all/100
 df1$flowerprop = df1$mean_Flowers_all/100
 df1$seedprop = df1$mean_Seeds_all/100
 df1$animalprop = df1$mean_Animal_all/100
-
-df1$Solitary[is.na(df1$Solitary)] = 0
-df1$MF[is.na(df1$MF)] = 0
-df1$MFF[is.na(df1$MFF)] = 0
-df1$FMM[is.na(df1$FMM)] = 0
-df1$FFMM[is.na(df1$FFMM)] = 0
-
 df1[df1$Habitat_cat=="","Habitat_cat"] = NA
 df1$Habitat_cat = as.factor(df1$Habitat_cat)
 
+#create data lists
+datal = rep(list(df1),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
+
 #generated dataset with imputation of missing values
-imp = mice(df1[,c("Genus_species","phylo","superfamily","effort",
+#warnings are due to constants in df (safely ignore)
+datal = lapply(datal, FUN = function(x) {
+                  complete(mice(x[,c("Genus_species","phylo","superfamily","effort_wf",
                   "Solitary","MF","MFF","FMM","FFMM",
-                  "Nbr_social_units", "IVSOint","Main1",
+                  "Nbr_social_units", "IVSOint",
                   "Habitat_heterogenity","Habitat_cat",
                   "foraging_style","logmean_bodysize",
                   "Locom","Activity_pattern","fruitprop","folivprop",
-                  "flowerprop","seedprop","animalprop")], m = 1)
-df1.mi = complete(imp)
+                  "flowerprop","seedprop","animalprop")], m = 1)) })
 
-df1.mi$SO_counts = with(df1, cbind(Solitary, MF, MFF, FMM, FFMM))
-df1.mi$SO_tot = with(df1, Solitary + MF + MFF + FMM + FFMM)
-df1.mi$MainSO = df1$MainSO
-df1.mi$obs = seq(1:nrow(df1))
+datal = lapply(datal, FUN = function(x) {x$SO_counts = with(x, cbind(Solitary, MF, MFF, FMM, FFMM))
+                                         x$SO_tot = with(x, Solitary + MF + MFF + FMM + FFMM)
+                                         x$obs = seq(1:nrow(x))
+                                         return(x)})
 
 #estimate model
-m.full = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-            data = df1.mi, data2 = list(A = A),
-            prior = c(prior("normal(0,1)", class = "Intercept"),
-                      prior("normal(0,1)", class = "b"), 
-                      prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                      eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu",
-                                                          levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-            warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
-            control=list(adapt_delta=0.90, max_treedepth=10))
+m.full = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
+                data = datal, data2 = phylol,
+                prior = c(prior("normal(0,1)", class = "Intercept"),
+                          prior("normal(0,1)", class = "b"),
+                          prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                          eval(parse(text=paste0("c(", 
+                          paste0(text="prior(\"exponential(2)\", 
+                          class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                          levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+                backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+                warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+                control=list(adapt_delta=0.95, max_treedepth=10))
 
 #save
 saveRDS(m.full, "m_full.RDS")
 m.full = readRDS("m_full.RDS")
 summary(m.full, robust = TRUE)
+full.fe = round(fixef(m.full, robust = TRUE, prob = c(0.05,0.95)),2)
+write.csv(full.fe, "full_fe.csv")
 
 #without imputation
-#estimate model
-df1$SO_counts = with(df1, cbind(Solitary, MF, MFF, FMM, FFMM))
-df1$SO_tot = with(df1, Solitary + MF + MFF + FMM + FFMM)
-df1$MainSO = df1$MainSO
-df1$obs = seq(1:nrow(df1))
+datal2 = rep(list(df1),5)
 
-m.full_nomi = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-            data = df1, data2 = list(A = A),
-            prior = c(prior("normal(0,1)", class = "Intercept"),
-                      prior("normal(0,1)", class = "b"), 
-                      prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                      eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu",
-                   levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-            warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
-            control=list(adapt_delta=0.90, max_treedepth=10))
+m.full_nomi = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
+                  data = datal2, data2 = phylol,
+                  prior = c(prior("normal(0,1)", class = "Intercept"),
+                            prior("normal(0,1)", class = "b"),
+                            prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                            eval(parse(text=paste0("c(", 
+                            paste0(text="prior(\"exponential(2)\", 
+                            class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                            levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+                  backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+                  warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+                  control=list(adapt_delta=0.95, max_treedepth=10))
 
 #save
 saveRDS(m.full_nomi, "m_full_nomi.RDS")
 m.full_nomi = readRDS("m_full_nomi.RDS")
 summary(m.full_nomi)
+full.fenomi = round(fixef(m.full_nomi, robust = TRUE, prob = c(0.05,0.95)),2)
+write.csv(full.fenomi, "full_nomi_fe.csv")
 
 #reparameterize in Stan
 
 #get model code
-txt = make_stancode(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-              data = df1.mi, data2 = list(A = A),
+df1.mi = datal[[1]]
+txt = make_stancode(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+              family = c(multinomial, binomial), data = df1.mi, data2 = list(A = A),
               prior = c(prior("normal(0,1)", class = "Intercept"),
-                        prior("normal(0,1)", class = "b"), 
+                        prior("normal(0,1)", class = "b"),
                         prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                        eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", levels(droplevels(df1.mi$MainSO))[-1], "\")",collapse = ","), ")")))))
+                        eval(parse(text=paste0("c(", 
+                        paste0(text="prior(\"exponential(2)\", 
+                        class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                        levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))))
 write(txt,"brms_stan1.stan")
+
+#get data files
+datal.stan = datal
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+for(i in 1:(length(phylol))){
+     x = make_standata(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+                        family = c(multinomial, binomial), data = datal.stan[[i]], 
+                        data2 = list(A = phylol[[i]]),
+                        prior = c(prior("normal(0,1)", class = "Intercept"),
+                        prior("normal(0,1)", class = "b"),
+                        prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                        eval(parse(text=paste0("c(", 
+                        paste0(text="prior(\"exponential(2)\", 
+                        class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                        levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))))
+     
+     #add extra variables for solitary variable
+     x$N_21 = x$N_1
+     x$N_22 = x$N_2
+     x$N_23 = x$N_3
+     x$N_24 = x$N_4
+     x$M_21 = x$M_1
+     x$M_22 = x$M_2
+     x$M_23 = x$M_3
+     x$M_24 = x$M_4
+     x$J_21_SOcounts = x$J_1_SOcounts
+     x$J_22_SOcounts = x$J_2_SOcounts
+     x$J_23_SOcounts = x$J_3_SOcounts
+     x$J_24_SOcounts = x$J_4_SOcounts
+     x$Z_21_muSolitary_SOcounts_1 = x$Z_1_muMF_SOcounts_1
+     x$Z_22_muSolitary_SOcounts_1 = x$Z_2_muMF_SOcounts_1
+     x$Z_23_muSolitary_SOcounts_1 = x$Z_3_muMF_SOcounts_1
+     x$Z_24_muSolitary_SOcounts_1 = x$Z_4_muMF_SOcounts_1
+     x$K_muSolitary_SOcounts = x$K_muMF_SOcounts
+     x$X_muSolitary_SOcounts = x$X_muMF_SOcounts
+     x$Ksp_muSolitary_SOcounts = x$Ksp_muMF_SOcounts
+     x$Imo_muSolitary_SOcounts = x$Imo_muMF_SOcounts
+     x$Jmo_muSolitary_SOcounts = x$Jmo_muMF_SOcounts
+     x$Xmo_muSolitary_SOcounts_1 = x$Xmo_muMF_SOcounts_1
+     x$con_simo_muSolitary_SOcounts_1 = x$con_simo_muMF_SOcounts_1
+     x$Lcov_23 = x$Lcov_3
+    datal.stan[[i]] = x
+    
+    }
+
+#run model
 
 #load modified code
 mod_r = rstan::stan_model("brms_reparam1.stan")
 
-#get data file
-data = make_standata(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-              data = df1.mi, data2 = list(A = A),
-              prior = c(prior("normal(0,1)", class = "Intercept"),
-                        prior("normal(0,1)", class = "b"), 
-                        prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                        eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))))
+#estimate over 5 random trees
+full.mod1 <- rstan::sampling(mod_r, data=datal.stan[[1]], init=0, iter = n_iter, warmup = n_warm,
+                            chains = n_chains, cores = n_chains, control = list(adapt_delta=0.95, max_treedepth=10))
+saveRDS(full.mod1, "full_mod1.RDS")
 
-#add extra variables for solitary variable
-data$N_21 = data$N_1
-data$N_22 = data$N_2
-data$N_23 = data$N_3
-data$N_24 = data$N_4
-data$M_21 = data$M_1
-data$M_22 = data$M_2
-data$M_23 = data$M_3
-data$M_24 = data$M_4
-data$J_21_SOcounts = data$J_1_SOcounts
-data$J_22_SOcounts = data$J_2_SOcounts
-data$J_23_SOcounts = data$J_3_SOcounts
-data$J_24_SOcounts = data$J_4_SOcounts
-data$Z_21_muSolitary_SOcounts_1 = data$Z_1_muMF_SOcounts_1
-data$Z_22_muSolitary_SOcounts_1 = data$Z_2_muMF_SOcounts_1
-data$Z_23_muSolitary_SOcounts_1 = data$Z_3_muMF_SOcounts_1
-data$Z_24_muSolitary_SOcounts_1 = data$Z_4_muMF_SOcounts_1
-data$K_muSolitary_SOcounts = data$K_muMF_SOcounts
-data$X_muSolitary_SOcounts = data$X_muMF_SOcounts
-data$Ksp_muSolitary_SOcounts = data$Ksp_muMF_SOcounts
-data$Imo_muSolitary_SOcounts = data$Imo_muMF_SOcounts
-data$Jmo_muSolitary_SOcounts = data$Jmo_muMF_SOcounts
-data$Xmo_muSolitary_SOcounts_1 = data$Xmo_muMF_SOcounts_1
-data$con_simo_muSolitary_SOcounts_1 = data$con_simo_muMF_SOcounts_1
-data$Lcov_23 = data$Lcov_3
+full.mod2 <- rstan::sampling(mod_r, data=datal.stan[[1]], init=0, iter = n_iter, warmup = n_warm,
+                             chains = n_chains, cores = n_chains, control = list(adapt_delta=0.95, max_treedepth=10))
+saveRDS(full.mod2, "full_mod2.RDS")
 
-#run model
+full.mod3 <- rstan::sampling(mod_r, data=datal.stan[[1]], init=0, iter = n_iter, warmup = n_warm,
+                             chains = n_chains, cores = n_chains, control = list(adapt_delta=0.95, max_treedepth=10))
+saveRDS(full.mod3, "full_mod3.RDS")
 
-#MCMC settings
-n_iter <- 3000
-n_warm <- 1000
-n_chains <- 4
+full.mod4 <- rstan::sampling(mod_r, data=datal.stan[[1]], init=0, iter = n_iter, warmup = n_warm,
+                             chains = n_chains, cores = n_chains, control = list(adapt_delta=0.95, max_treedepth=10))
+saveRDS(full.mod4, "full_mod4.RDS")
 
-#estimate
-full.mod <- rstan::sampling(mod_r, data=data, init=0, iter = n_iter, warmup = n_warm, seed = 9,
-                            chains = n_chains, cores = n_chains, control = list(adapt_delta=0.90, max_treedepth=10))
-saveRDS(full.mod, "full_mod.RDS")
-full.mod = readRDS("full_mod.RDS")
+full.mod5 <- rstan::sampling(mod_r, data=datal.stan[[1]], init=0, iter = n_iter, warmup = n_warm,
+                             chains = n_chains, cores = n_chains, control = list(adapt_delta=0.95, max_treedepth=10))
+saveRDS(full.mod5, "full_mod5.RDS")
 
-
-launch_shinystan(full.mod)
+#load models
+full.mod1 = readRDS("full_mod1.RDS")
+full.mod2 = readRDS("full_mod2.RDS")
+full.mod3 = readRDS("full_mod3.RDS")
+full.mod4 = readRDS("full_mod4.RDS")
+full.mod5 = readRDS("full_mod5.RDS")
 
 ############################################################
 #Plot variance explained
 ############################################################
-post = (rstan::extract(full.mod))
+
+#combine posteriors
+comb.mod = rstan::sflist2stanfit(list(full.mod1,full.mod2,full.mod3,full.mod4,full.mod5))
+post = rstan::extract(comb.mod)
 
 #variance explained by fixed effects
 fe_v =  data.frame(Solitary = apply(post$muSolitary_SOcounts, 1, var) - apply(post$muSolitary_SOcounts2, 1, var),
@@ -766,7 +1037,6 @@ fe_v =  data.frame(Solitary = apply(post$muSolitary_SOcounts, 1, var) - apply(po
                   IVSO = apply(post$mu_IVSOint, 1, var) - apply(post$mu_IVSOint2, 1, var))
 #change negative values
 fe_v[fe_v<0] = 0
-
 
 species_v =  data.frame(Solitary = post$sd_21^2,
                         MF = post$sd_1^2,
@@ -878,20 +1148,38 @@ save_plot("variance_explained.png", R2.plot, base_height = 3.5, base_width = 12)
 saveRDS(R2.plot, "r2_plot.RDS")
 R2.plot = readRDS("r2_plot.RDS")
 
-
 ############################################################
 #Specific ecological effects (univariate)
 ############################################################
 #each section fits a model for a single predictor
 #and then creates a plot for the total effect
 
-df1 = df_10[[1]]
-#prepare vcv matrix
-A = vcv(c_tree, corr = TRUE)
+#create copy of dataframe for manipulation
+df1 = dataGR
+
+#random phylo tree
+tree = trees[[sample(1:length(trees),1)]]
+A = vcv(tree, corr = TRUE)
+
 #sort population rows to match species-level phylogeny
 df1 = df1[order(match(df1$Genus_species, rownames(A))),]
-#organize predictors
+
+#prep response and predictor variables
+df1$Solitary[is.na(df1$Solitary)] = 0
+df1$MF[is.na(df1$MF)] = 0
+df1$MFF[is.na(df1$MFF)] = 0
+df1$FMM[is.na(df1$FMM)] = 0
+df1$FFMM[is.na(df1$FFMM)] = 0
+df1$SO_counts = with(df1, cbind(Solitary, MF, MFF, FMM, FFMM))
+df1$SO_tot = with(df1, Solitary + MF + MFF + FMM + FFMM)
+df1$obs = seq(1:nrow(df1))
+
 df1$effort = as.vector(scale(log(df1$Nbr_papers_for_each_field_sites)))
+f_mean = aggregate(Nbr_papers_for_each_field_sites ~ superfamily, mean, data = df1)
+rownames(f_mean) = f_mean$superfamily
+df1$effort_bf = as.vector(scale(f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
+df1$effort_wf = as.vector(scale(df1$Nbr_papers_for_each_field_sites - 
+                                  f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
 df1$Activity_pattern = ifelse(df1$Activity_pattern == "Cathemeral_Diurnal_Nocturnal", "Cathemeral",
                               ifelse(df1$Activity_pattern == "Cathemeral_Diurnal", "Cathemeral", 
                                      df1$Activity_pattern))
@@ -902,7 +1190,6 @@ df1$Locom = as.factor(df1$Locom)
 df1$logmean_bodysize = 
   as.vector(scale(log( 1 + apply(cbind(df1$mean_Male_all,df1$mean_Female_all,df1$mean_other_all),
                                  1, mean, na.rm = TRUE) )))
-
 df1$foraging_style = ifelse(df1$foraging_style == "one", "solitary",
                             ifelse(df1$foraging_style == "unknown", NA,
                                    ifelse(df1$foraging_style == " ", NA,
@@ -913,39 +1200,44 @@ df1$folivprop = df1$mean_Leaves_all/100
 df1$flowerprop = df1$mean_Flowers_all/100
 df1$seedprop = df1$mean_Seeds_all/100
 df1$animalprop = df1$mean_Animal_all/100
+df1[df1$Habitat_cat=="","Habitat_cat"] = NA
+df1$Habitat_cat = as.factor(df1$Habitat_cat)
 
-df1$Solitary[is.na(df1$Solitary)] = 0
-df1$MF[is.na(df1$MF)] = 0
-df1$MFF[is.na(df1$MFF)] = 0
-df1$FMM[is.na(df1$FMM)] = 0
-df1$FFMM[is.na(df1$FFMM)] = 0
-
-df1$SO_counts = with(df1, cbind(Solitary, MF, MFF, FMM, FFMM))
-df1$SO_tot = with(df1, Solitary + MF + MFF + FMM + FFMM)
-df1$obs = seq(1:nrow(df1))
+#create data lists
+datal = rep(list(df1),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
 
 ############################################################
 #activity
 #model formula
 SO_m = bf(SO_counts | trials(SO_tot) ~ 
-            1 + Activity_pattern + effort +
+            1 + Activity_pattern + effort_wf +
             (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
 IVSO_m = bf(IVSOint | trials(SO_tot) ~ 
-            1 + Activity_pattern + effort + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|superfamily) + (1|obs))
+            1 + Activity_pattern + effort_wf + 
+            (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs))
 
-m.act = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-             data = df1, data2 = list(A = A),
-             prior = c(prior("normal(0,1)", class = "Intercept"),
-                       prior("normal(0,1)", class = "b"), 
-                       prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                       eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-             warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
-             control=list(adapt_delta=0.95, max_treedepth=10))
+m.act = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+            family = c(multinomial, binomial), data = datal, data2 = phylol,
+            prior = c(prior("normal(0,1)", class = "Intercept"),
+                      prior("normal(0,1)", class = "b"),
+                      prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                      eval(parse(text=paste0("c(", 
+                      paste0(text="prior(\"exponential(2)\", 
+                      class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                      levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+            backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+            warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+            control=list(adapt_delta=0.95, max_treedepth=10))
 
 saveRDS(m.act, "m_act.RDS")
 m.act = readRDS("m_act.RDS")
 summary(m.act, robust = TRUE)
+fixef(m.act, robust = TRUE)
 
 ############################################################
 c1  = plot(conditional_effects(m.act, resp = "SOcounts", effect = "Activity_pattern",
@@ -964,6 +1256,7 @@ df2$effect2__ = "Overall IVSO"
 df3 = rbind(df,df2)
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 df3$response = factor(df3$effect1__, levels = c("Solitary", "MF", "MFF", "FMM", "FFMM","Overall IVSO"))
 
@@ -990,45 +1283,9 @@ act.p1 =
         panel.grid.minor = element_blank(),
         panel.spacing = unit(2, "lines"))
 
-#IVSO effect
-#c2  = plot(conditional_effects(m.act, resp = "IVSOint", effect = "Activity_pattern",
-#                               conditions = data.frame(SO_tot=1), robust = TRUE, prob = 0.9), plot = FALSE)
-#df = c2$IVSOint.IVSOint_Activity_pattern$data
-#
-#df$response = "Overall IVSO"
-#df$response = factor(df$response, levels = c("Overall IVSO", "Solitary", "MF", "MFF", "FMM", "FFMM"))
-#
-#act.p2 = 
-#  ggplot(df, aes(x = effect1__, y = estimate__, group = effect1__, color = response))+
-#  scale_y_continuous(lim=c(0,1))+
-#  geom_point(position=position_dodge(width=0.5), size = 2)+
-#  geom_errorbar(ymin = df$lower__, ymax = df$upper__, width = 0,
-#                position=position_dodge(width=0.5))+
-#  scale_color_manual(values = colors[6], drop = TRUE)+
-#  xlab("\nActivity pattern")+
-#  ylab("Probability\n")+
-#  theme(legend.position = "top",
-#        legend.title = element_blank(),
-#        legend.key = element_rect(fill = "white"),
-#        legend.text = element_text(size = 8),
-#        axis.title.y = element_blank(),
-#        axis.text.y = element_text(size = 8),
-#        axis.text.x = element_text(size = 8),
-#        axis.title.x = element_blank(),
-#        panel.border=element_rect(fill=NA,color="black", size=1, linetype="solid"),
-#        panel.background= element_blank(),
-#        panel.grid.major = element_blank(),
-#        panel.grid.minor = element_blank(),
-#        panel.spacing = unit(2, "lines"))
-#combine
-#act.p3 = plot_grid(act.p1, act.p2, align = "hv", nrow = 1)
-#act.p3 = ggdraw(add_sub(act.p3, "\nActivity pattern", fontface = "bold", size = 10, 
-#                        vpadding=grid::unit(0,"lines"),y=5, x=0.55, vjust=4.5))
-#ggsave("act_p3.png", act.p3, width = 9, height = 3)
-
 #calculate comparisons of interest
-newdf = data.frame(Activity_pattern = unique(df1$Activity_pattern), SO_tot = 1, effort = 0)
-pred = fitted(N10_cmact, newdata = newdf, re_formula = NA, summary = FALSE, scale = "response")
+newdf = data.frame(Activity_pattern = unique(df1$Activity_pattern), SO_tot = 1, effort_wf = 0)
+pred = fitted(m.act, newdata = newdf, re_formula = NA, summary = FALSE, scale = "response")
 comp1 = apply(pred, 3, FUN = function(x) x[,1] - x[,2] ) #nocturnal - diurnal
 comp2 = apply(pred, 3, FUN = function(x) x[,3] - x[,2] ) #cathemeral - diurnal
 comp3 = apply(pred, 3, FUN = function(x) x[,1] - x[,3] ) #nocturnal - diurnal
@@ -1050,29 +1307,34 @@ act_comp =
                           ")") )
 
 write.csv(act_comp,"act_comp.csv")
+act_comp
 
 ############################################################
 #locomotion
 SO_m = bf(SO_counts | trials(SO_tot) ~ 
-              1 + Locom + effort +
+              1 + Locom + effort_wf +
              (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs))
 IVSO_m = bf(IVSOint | trials(SO_tot) ~ 
-              1 + Locom + effort +
-             (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|superfamily) + (1|obs))
+              1 + Locom + effort_wf +
+              (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species)  + (1|obs))
 
-m.loc = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-            data = df1, data2 = list(A = A),
+m.loc = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+            family = c(multinomial, binomial), data = datal, data2 = phylol,
             prior = c(prior("normal(0,1)", class = "Intercept"),
-                      prior("normal(0,1)", class = "b"), 
+                      prior("normal(0,1)", class = "b"),
                       prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                      eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-            warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
+                      eval(parse(text=paste0("c(", 
+                      paste0(text="prior(\"exponential(2)\", 
+                      class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                      levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+            backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+            warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
             control=list(adapt_delta=0.95, max_treedepth=10))
 
 saveRDS(m.loc, "m_loc.RDS")
 m.loc = readRDS("m_loc.RDS")
 summary(m.loc, robust = TRUE)
+fixef(m.loc, robust = TRUE)
 
 ############################################################
 c1  = plot(conditional_effects(m.loc, resp = "SOcounts", effect = "Locom",
@@ -1081,10 +1343,9 @@ c1  = plot(conditional_effects(m.loc, resp = "SOcounts", effect = "Locom",
 df = c1$`SOcounts.SOcounts_Locom:cats__`$data
 
 c2  = plot(conditional_effects(m.loc, resp = "IVSOint", effect = "Locom",
-                               conditions = data.frame(Nbr_social_units=1), robust = TRUE, prob = 0.9), plot = FALSE)
+                               conditions = data.frame(SO_tot=1), 
+                               robust = TRUE, prob = 0.9), plot = FALSE)
 df2 = c2$IVSOint.IVSOint_Locom$data
-
-colors = brewer.pal(n = 8, "Dark2")
 
 df2$cats__ = "Overall IVSO"
 df2$effect1__ = df2$Locom
@@ -1093,6 +1354,7 @@ df2$effect2__ = "Overall IVSO"
 df3 = rbind(df,df2)
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 df3$response = factor(df3$effect1__, levels = c("Solitary", "MF", "MFF", "FMM", "FFMM","Overall IVSO"))
 
@@ -1121,46 +1383,9 @@ loc.p1 =
         panel.grid.minor = element_blank(),
         panel.spacing = unit(2, "lines"))
 
-#IVSO effect
-#c2  = plot(conditional_effects(m.loc, resp = "IVSOint", effect = "Locom",
-#                               conditions = data.frame(Nbr_social_units=1), robust = TRUE, prob = 0.9), plot = FALSE)
-#df = c2$IVSOint.IVSOint_Locom$data
-#
-#df$response = "Overall IVSO"
-#df$response = factor(df$response, levels = c("Overall IVSO", "Solitary", "MF", "MFF", "FMM", "FFMM"))
-#
-#loc.p2 = 
-#  ggplot(df, aes(x = effect1__, y = estimate__, group = effect1__, color = response))+
-#  scale_y_continuous(lim=c(0,1))+
-#  scale_x_discrete(labels = c("Arboreal", "Both", "Terrestrial"))+
-#  geom_point(position=position_dodge(width=0.5), size = 2)+
-#  geom_errorbar(ymin = df$lower__, ymax = df$upper__, width = 0,
-#                position=position_dodge(width=0.5))+
-#  scale_color_manual(values = colors[6], drop = TRUE)+
-#  xlab("Locomotion")+
-#  theme(legend.position = "top",
-#        legend.title = element_blank(),
-#        legend.key = element_rect(fill = "white"),
-#        legend.text = element_text(size = 8),
-#        axis.title.y = element_blank(),
-#        axis.text.y = element_text(size = 8),
-#        axis.text.x = element_text(size = 8),
-#        axis.title.x = element_blank(),
-#        panel.border=element_rect(fill=NA,color="black", size=1, linetype="solid"),
-#        panel.background= element_blank(),
-#        panel.grid.major = element_blank(),
-#        panel.grid.minor = element_blank(),
-#        panel.spacing = unit(2, "lines"))
-
-#combine
-#loc.p3 = plot_grid(loc.p1, loc.p2, align = "hv", nrow = 1)
-#loc.p3 = ggdraw(add_sub(loc.p3, "\nLocomotion", fontface = "bold", size = 10, 
-#                        vpadding=grid::unit(0,"lines"),y=5, x=0.55, vjust=4.5))
-#ggsave("loc_p3.png", loc.p3, width = 9, height = 3)
-
 #calculate comparisons of interest
-newdf = data.frame(Locom_s = unique(df1$Locom_s), Nbr_social_units = 1)
-pred = fitted(N10_cmloc, newdata = newdf, re_formula = NA, summary = FALSE, scale = "response")
+newdf = data.frame(Locom_s = unique(df1$Locom), Nbr_social_units = 1)
+pred = fitted(m.loc, newdata = newdf, re_formula = NA, summary = FALSE, scale = "response")
 comp1 = apply(pred, 3, FUN = function(x) x[,1] - x[,2] ) #AR - BOTH
 comp2 = apply(pred, 3, FUN = function(x) x[,3] - x[,4] ) #BOTH - T
 comp3 = apply(pred, 3, FUN = function(x) x[,1] - x[,4] ) #AR - T
@@ -1182,29 +1407,34 @@ loc_comp =
                        ")") )
 
 write.csv(loc_comp,"loc_comp.csv")
+loc_comp
 
 ############################################################
 #body size
 SO_m = bf(SO_counts | trials(SO_tot) ~ 
-            1 + logmean_bodysize + effort +
+            1 + logmean_bodysize + effort_wf +
             (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs))
 IVSO_m = bf(IVSOint | trials(SO_tot) ~ 
-              1 + logmean_bodysize + effort +
+              1 + logmean_bodysize + effort_wf +
               (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|superfamily) + (1|obs))
 
-m.bs = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-            data = df1, data2 = list(A = A),
-            prior = c(prior("normal(0,1)", class = "Intercept"),
-                      prior("normal(0,1)", class = "b"), 
-                      prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                      eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-            warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
-            control=list(adapt_delta=0.95, max_treedepth=10))
+m.bs = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+           family = c(multinomial, binomial), data = datal, data2 = phylol,
+           prior = c(prior("normal(0,1)", class = "Intercept"),
+                     prior("normal(0,1)", class = "b"),
+                     prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                     eval(parse(text=paste0("c(", 
+                     paste0(text="prior(\"exponential(2)\", 
+                     class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                     levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+           backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+           warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+           control=list(adapt_delta=0.95, max_treedepth=10))
 
 saveRDS(m.bs, "m_bs.RDS")
 m.bs = readRDS("m_bs.RDS")
 summary(m.bs, robust = TRUE)
+fixef(m.bs, robust = TRUE)
 
 ############################################################
 #MainSO
@@ -1224,6 +1454,7 @@ df2$cats__ = "Overall IVSO"
 df3 = rbind(df,df2)
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 bs.p1 = 
   ggplot(df3, aes(x = effect1__, y = estimate__, group = cats__, color = cats__))+
@@ -1252,6 +1483,32 @@ bs.p1 =
 
 ggsave("bs_p1.png", bs.p1, width = 10, height = 3)
 
+#calculate comparisons of interest
+newdf = data.frame(logmean_bodysize = c(-1,0,1), SO_tot = 1, effort_wf=0)
+pred = fitted(m.bs, newdata = newdf, re_formula = NA, summary = FALSE, scale = "response")
+comp1 = apply(pred, 3, FUN = function(x) x[,1] - x[,2] ) #low - avg
+comp2 = apply(pred, 3, FUN = function(x) x[,1] - x[,3] ) #low - high
+comp3 = apply(pred, 3, FUN = function(x) x[,2] - x[,3] ) #avg - high
+
+bs_comp = 
+  data.frame(
+    outcome = names(pred[1,1,]),
+    diff_low_avg = paste0(round(apply(comp1,2,median),2), "(",
+                          apply(apply(comp1, 2, quantile, c(0.05, 0.95)),2, 
+                                FUN = function(x) paste(round(x[1],2), ",", round(x[2],3))),
+                          ")"),
+    diff_low_high = paste0(round(apply(comp2,2,median),2), "(",
+                         apply(apply(comp2, 2, quantile, c(0.05, 0.95)),2, 
+                               FUN = function(x) paste(round(x[1],2), ",", round(x[2],3))),
+                         ")"),
+    diff_avg_high = paste0(round(apply(comp3,2,median),2), "(",
+                           apply(apply(comp3, 2, quantile, c(0.05, 0.95)),2, 
+                                 FUN = function(x) paste(round(x[1],2), ",", round(x[2],3))),
+                           ")"))
+
+write.csv(bs_comp,"bs_comp.csv")
+bs_comp
+
 
 ############################################################
 #combine plots for Figure 3
@@ -1261,35 +1518,39 @@ library(cowplot)
 f2a = R2.plot
 f2b = plot_grid(act.p1,loc.p1, align = "h", nrow = 1)
 f2b = plot_grid(f2b, bs.p1, nrow = 2)
-f2c = asr.primary
-figure2 = plot_grid(f2a, f2b, f2c, ncol = 1, rel_heights = c(0.25,0.5,0.25))
-ggsave("figure2_primateivso.png", figure2, width = 10.5, height = 11.5)
-
+figure2 = plot_grid(f2a, f2b, ncol = 1, rel_heights = c(0.35,0.65))
+ggsave("figure2_primateivso.png", figure2, width = 11, height = 9)
 
 ############################################################
 #habitat effects
-df1.1 = df1[df1$Habitat_cat!="",]
+datal2 = lapply(datal, FUN = function(x) {
+  x = x[!is.na(x$Habitat_cat),]
+  return(x)})
 
 SO_m = bf(SO_counts | trials(SO_tot) ~ 
-            1 +  mo(Habitat_heterogenity) + Habitat_cat + effort +
+            1 +  mo(Habitat_heterogenity) + Habitat_cat + effort_wf +
             (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs))
 IVSO_m = bf(IVSOint | trials(SO_tot) ~ 
-              1 + mo(Habitat_heterogenity) + Habitat_cat + effort +
+              1 + mo(Habitat_heterogenity) + Habitat_cat + effort_wf +
               (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|superfamily) + (1|obs))
 
-m.hab = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-           data = df1.1, data2 = list(A = A),
+m.hab = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+           family = c(multinomial, binomial), data = datal2, data2 = phylol,
            prior = c(prior("normal(0,1)", class = "Intercept"),
-                     prior("normal(0,1)", class = "b"), 
+                     prior("normal(0,1)", class = "b"),
                      prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                     eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-           warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
+                     eval(parse(text=paste0("c(", 
+                     paste0(text="prior(\"exponential(2)\", 
+                     class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                     levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+           backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+           warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
            control=list(adapt_delta=0.95, max_treedepth=10))
 
 saveRDS(m.hab, "m_hab.RDS")
 m.hab = readRDS("m_hab.RDS")
 summary(m.hab, robust = TRUE)
+fixef(m.hab, robust = TRUE)
 
 ############################################################
 c1  = plot(conditional_effects(m.hab, resp = "SOcounts", effect = "Habitat_cat",
@@ -1298,6 +1559,7 @@ c1  = plot(conditional_effects(m.hab, resp = "SOcounts", effect = "Habitat_cat",
 df = c1$`SOcounts.SOcounts_Habitat_cat:cats__`$data
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 hab.p1 = 
   ggplot(df, aes(x = effect1__, y = estimate__, group = cats__, color = cats__))+
@@ -1373,6 +1635,7 @@ df2$cats__ = "Overall IVSO"
 df3 = rbind(df,df2)
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 het.p1 = 
   ggplot(df3, aes(x = effect1__, y = estimate__, group = cats__, color = cats__))+
@@ -1405,25 +1668,29 @@ ggsave("het_p1.png", het.p1, width = 10, height = 3)
 #fruit diet proportion
 
 SO_m = bf(SO_counts | trials(SO_tot) ~ 
-            1 +  fruitprop + effort + 
+            1 +  fruitprop + effort_wf + 
             (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs))
 IVSO_m = bf(IVSOint | trials(SO_tot) ~ 
-            1 +  fruitprop + effort + 
+            1 +  fruitprop + effort_wf + 
             (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|superfamily) + (1|obs))
 
-m.fruit = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-            data = df1, data2 = list(A = A),
-            prior = c(prior("normal(0,1)", class = "Intercept"),
-                      prior("normal(0,1)", class = "b"), 
-                      prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                      eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-            warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
-            control=list(adapt_delta=0.95, max_treedepth=10))
+m.fruit = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+              family = c(multinomial, binomial), data = datal, data2 = phylol,
+              prior = c(prior("normal(0,1)", class = "Intercept"),
+                        prior("normal(0,1)", class = "b"),
+                        prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                        eval(parse(text=paste0("c(", 
+                        paste0(text="prior(\"exponential(2)\", 
+                        class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                        levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+              backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+              warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+              control=list(adapt_delta=0.95, max_treedepth=10))
 
 saveRDS(m.fruit, "m_fruit.RDS")
 m.fruit = readRDS("m_fruit.RDS")
 summary(m.fruit, robust = TRUE)
+fixef(m.fruit, robust = TRUE)
 
 ############################################################
 c1  = plot(conditional_effects(m.fruit, resp = "SOcounts", effect = "fruitprop",
@@ -1443,6 +1710,7 @@ df2$cats__ = "Overall IVSO"
 df3 = rbind(df,df2)
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 fruit.p1 = 
   ggplot(df3, aes(x = effect1__, y = estimate__, group = cats__, color = cats__))+
@@ -1471,34 +1739,6 @@ fruit.p1 =
 
 ggsave("fruit_p1.png", fruit.p1, width = 10, height = 3)
 
-
-#calculate comparisons of interest
-newdf = data.frame(fruitprop = c(0,1), SO_tot = 1, effort = 0)
-pred = fitted(m.fruit, newdata = newdf, re_formula = NA, summary = FALSE, scale = "response")
-comp1 = apply(pred, 3, FUN = function(x) x[,2] - x[,1] ) #1 - 0
-
-median(comp1[,"IVSOint"]); sd(comp1[,"IVSOint"]); quantile(comp1[,"IVSOint"], c(0.05, 0.95))
-
-bs_comp = 
-  data.frame(
-    outcome = names(pred[1,1,]),
-    diff_low_avg = paste0(round(apply(comp1,2,median),2), "(",
-                          apply(apply(comp1, 2, quantile, c(0.05, 0.95)),2, 
-                                FUN = function(x) paste(round(x[1],2), ",", round(x[2],2))),
-                          ")"),
-    diff_avg_high = paste0(round(apply(comp2,2,median),2), "(",
-                           apply(apply(comp2, 2, quantile, c(0.05, 0.95)),2, 
-                                 FUN = function(x) paste(round(x[1],2), ",", round(x[2],2))),
-                           ")"),
-    diff_low_high = paste0(round(apply(comp3,2,median),2), "(",
-                           apply(apply(comp3, 2, quantile, c(0.05, 0.95)),2, 
-                                 FUN = function(x) paste(round(x[1],2), ",", round(x[2],2))),
-                           ")") )
-
-write.csv(bs_comp,"bs_comp.csv")
-
-
-
 ############################################################
 #folivory diet proportion
 
@@ -1509,19 +1749,25 @@ IVSO_m = bf(IVSOint | trials(SO_tot) ~
               1 +  folivprop + effort + 
               (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|superfamily) + (1|obs))
 
-m.foliv = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-              data = df1, data2 = list(A = A),
+m.foliv = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE),
+              family = c(multinomial, binomial), data = datal, data2 = phylol,
               prior = c(prior("normal(0,1)", class = "Intercept"),
-                        prior("normal(0,1)", class = "b"), 
+                        prior("normal(0,1)", class = "b"),
                         prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                        eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-              warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
+                        eval(parse(text=paste0("c(", 
+                        paste0(text="prior(\"exponential(2)\", 
+                        class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                        levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+              backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+              warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
               control=list(adapt_delta=0.95, max_treedepth=10))
 
 saveRDS(m.foliv, "m_foliv.RDS")
 m.foliv = readRDS("m_foliv.RDS")
 summary(m.foliv, robust = TRUE)
+fixef(m.foliv, robust = TRUE)
+
+
 ############################################################
 c1  = plot(conditional_effects(m.foliv, resp = "SOcounts", effect = "folivprop",
                                conditions = data.frame(SO_tot = 1),
@@ -1538,6 +1784,7 @@ df2$cats__ = "Overall IVSO"
 df3 = rbind(df,df2)
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 folv.p1 = 
   ggplot(df3, aes(x = effect1__, y = estimate__, group = cats__, color = cats__))+
@@ -1576,19 +1823,24 @@ IVSO_m = bf(IVSOint | trials(SO_tot) ~
               1 +  seedprop + effort + 
               (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|superfamily) + (1|obs))
 
-m.seed = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-              data = df1, data2 = list(A = A),
-              prior = c(prior("normal(0,1)", class = "Intercept"),
-                        prior("normal(0,1)", class = "b"), 
-                        prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                        eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-              warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
-              control=list(adapt_delta=0.95, max_treedepth=10))
+m.seed = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE),
+                      family = c(multinomial, binomial), data = datal, data2 = phylol,
+                      prior = c(prior("normal(0,1)", class = "Intercept"),
+                                prior("normal(0,1)", class = "b"),
+                                prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                                eval(parse(text=paste0("c(", 
+                                    paste0(text="prior(\"exponential(2)\", 
+                                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                                    levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+                      backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+                      warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+                      control=list(adapt_delta=0.95, max_treedepth=10))
 
 saveRDS(m.seed, "m_seed.RDS")
 m.seed = readRDS("m_seed.RDS")
 summary(m.seed, robust = TRUE)
+fixef(m.seed, robust = TRUE)
+
 ############################################################
 c1  = plot(conditional_effects(m.seed, resp = "SOcounts", effect = "seedprop",
                                conditions = data.frame(SO_tot = 1),
@@ -1605,6 +1857,7 @@ df2$cats__ = "Overall IVSO"
 df3 = rbind(df,df2)
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 seed.p1 = 
   ggplot(df3, aes(x = effect1__, y = estimate__, group = cats__, color = cats__))+
@@ -1643,19 +1896,24 @@ IVSO_m = bf(IVSOint | trials(SO_tot) ~
               1 +  animalprop + effort + 
               (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|superfamily) + (1|obs))
 
-m.animal = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-             data = df1, data2 = list(A = A),
-             prior = c(prior("normal(0,1)", class = "Intercept"),
-                       prior("normal(0,1)", class = "b"), 
-                       prior("exponential(2)", class = "sd", resp = "IVSOint"),
-                       eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-             warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
-             control=list(adapt_delta=0.95, max_treedepth=10))
+m.animal = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE),
+               family = c(multinomial, binomial), data = datal, data2 = phylol,
+               prior = c(prior("normal(0,1)", class = "Intercept"),
+                         prior("normal(0,1)", class = "b"),
+                         prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                         eval(parse(text=paste0("c(", 
+                         paste0(text="prior(\"exponential(2)\", 
+                         class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                         levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+               backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+               warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+               control=list(adapt_delta=0.95, max_treedepth=10))
 
 saveRDS(m.animal, "m_animal.RDS")
 m.animal = readRDS("m_animal.RDS")
 summary(m.animal, robust = TRUE)
+fixef(m.animal, robust = TRUE)
+
 
 ############################################################
 c1  = plot(conditional_effects(m.animal, resp = "SOcounts", effect = "animalprop",
@@ -1673,6 +1931,7 @@ df2$cats__ = "Overall IVSO"
 df3 = rbind(df,df2)
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 animal.p1 = 
   ggplot(df3, aes(x = effect1__, y = estimate__, group = cats__, color = cats__))+
@@ -1710,20 +1969,24 @@ IVSO_m = bf(IVSOint | trials(SO_tot) ~
     1 + foraging_style + effort +
     (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|superfamily) + (1|obs))
 
-m.forg = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), family = c(multinomial, binomial),
-              data = df1, data2 = list(A = A),
-              prior = c(prior("normal(0,1)", class = "Intercept"),
-              prior("normal(0,1)", class = "b"), 
-              prior("exponential(2)", class = "sd", resp = "IVSOint"),
-              eval(parse(text=paste0("c(", paste0(text="prior(\"exponential(2)\", 
-              class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
-              levels(droplevels(df1$MainSO))[-1], "\")",collapse = ","), ")")))),
-              warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0, 
-              control=list(adapt_delta=0.95, max_treedepth=10))
+m.forg = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE),
+             family = c(multinomial, binomial), data = datal, data2 = phylol,
+             prior = c(prior("normal(0,1)", class = "Intercept"),
+                       prior("normal(0,1)", class = "b"),
+                       prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                       eval(parse(text=paste0("c(", 
+                       paste0(text="prior(\"exponential(2)\", 
+                       class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                       levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+             backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+             warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+             control=list(adapt_delta=0.95, max_treedepth=10))
 
 saveRDS(m.forg, "m_forg.RDS")
 m.forg = readRDS("m_forg.RDS")
 summary(m.forg, robust = TRUE)
+fixef(m.forg, robust = TRUE)
+
 
 ############################################################
 c1  = plot(conditional_effects(m.forg, resp = "SOcounts", effect = "foraging_style",
@@ -1732,6 +1995,7 @@ c1  = plot(conditional_effects(m.forg, resp = "SOcounts", effect = "foraging_sty
 df = c1$`SOcounts.SOcounts_foraging_style:cats__`$data
 
 colors = brewer.pal(n = 8, "Dark2")
+colors[[6]] = "#3ed8e6"
 
 forg.p1 = 
   ggplot(df, aes(x = effect1__, y = estimate__, group = cats__, color = cats__))+
@@ -1771,8 +2035,6 @@ forg.p2 =
   geom_errorbar(ymin = df$lower__, ymax = df$upper__, width = 0,
                 position=position_dodge(width=0.5))+
   scale_color_manual(values = colors[6], drop = TRUE)+
-  #scale_color_discrete(drop = FALSE)+
-  xlab("\nForaging Style")+
   ylab("Probability\n")+
   theme(legend.position = "top",
         legend.title = element_blank(),
@@ -1792,7 +2054,6 @@ forg.p3 = plot_grid(forg.p1, forg.p2, align = "hv", nrow = 1)
 forg.p3 = ggdraw(add_sub(forg.p3, "\nForaging strategy", fontface = "bold", size = 10, 
                         vpadding=grid::unit(0,"lines"),y=5, x=0.55, vjust=4.5))
 ggsave("forg_p3.png", forg.p3, width = 9, height = 3)
-
 
 
 
