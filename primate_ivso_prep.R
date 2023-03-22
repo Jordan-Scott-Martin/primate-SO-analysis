@@ -6,7 +6,7 @@ setwd(" ")
 
 #load dataset to get phylogeny setup
 #use R dataset (decision is arbitrary)
-data = read.csv("db_R.csv")
+data = read.csv("db_Rrev.csv")
 
 #remove species without main SO
 data = data[-which(grepl(" ",data$main_SO)), ]
@@ -46,9 +46,9 @@ setdiff(spp, tree$tip.label)
 #final datasets for analysis
 
 #load data
-dataR = read.csv("db_R.csv")
-dataG = read.csv("db_G.csv")
-dataGR = read.csv("db_GR.csv")
+dataR = read.csv("db_Rrev.csv")
+dataG = read.csv("db_Grev.csv")
+dataGR = read.csv("db_GRrev.csv")
 
 #remove species without main SO (445 -> 223 sp)
 dataR = dataR[-which(grepl(" ",dataR$main_SO)), ]

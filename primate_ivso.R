@@ -18,7 +18,8 @@ library(cowplot)
 library(RColorBrewer)
 
 #set path for cmdstan installation (optional)
-cmdstanr::set_cmdstan_path(" ")
+cmdstanr::set_cmdstan_path("C:/Temp/cmdstan-2.29.2")
+cmdstanr::set_cmdstan_path("C:/Stan/cmdstan-2.30.1")
 
 #MCMC settings
 n_iter <- 2000
@@ -44,8 +45,13 @@ trees = read.nexus("vert phylo.nex")
 #brms and stan models requires GBs of memory)
 setwd(" ")
 
-#create consensus phylogeny
+#create consensus phylogeny for robustness checks
 c_tree = phytools::consensus.edges(trees, method="mean.edge", if.absent="zero")
+
+#data files without uncertain zeroes for IVSO robustness checks
+dRr = dataR[dataR$Nbr_social_units>1,]
+dGr = dataG[dataG$Nbr_social_units>1,]
+dGRr = dataGR[dataGR$Nbr_social_units>1,]
 
 ############################################################
 #Save image of phylogeny
@@ -66,7 +72,7 @@ png("phyloivso_radial_cont.png", width = 10, height = 10, units = "in", res = 60
 obj = contMap(phytools::force.ultrametric(c_tree, method="extend"),
               x, plot=FALSE, type ="fan", lwd=0.5)
 n = length(obj$cols)
-colfunc = colorRampPalette(c("purple", "red"))
+colfunc = colorRampPalette(c("darkpurple", "yellow"))
 obj$cols[1:n]<-colfunc(n)
 plot(obj, type ="fan", ftype = "off", lwd = 3, spread.labels = TRUE)        
 dev.off()
@@ -76,10 +82,6 @@ dev.off()
 ############################################################
 #create copy of dataframe for manipulation
 df1 = dataGR
-
-#sort population rows to match species-level phylogeny
-df1 = df1[order(match(df1$Genus_species, rownames(A))),]
-
 
 #representation of superfamilies
 library(ggplot2)
@@ -119,14 +121,14 @@ table(df1$Main2) #varies because of unresolved main SO
 
 dfp = data.frame(cat = factor(c("solitary","MF","MFF","FMM","FFMM"), levels = 
                                 c("solitary","MF","MFF","FMM","FFMM")),
-                 valh = c(16, 96, 140, 9, 269), 
-                 vall = c(15, 88, 119, 7, 240)) 
+                 valh = c(16, 96, 140, 8, 268), 
+                 vall = c(15, 88, 119, 7, 239)) 
 
 colors = brewer.pal(n = 8, "Dark2")
 
 hist1 =
 ggplot(dfp, aes(x = cat, y = valh, alpha = 0.8)) + 
-  geom_col(color = "black", fill = "grey")+
+  geom_col(color = "black", fill = "black")+
   xlab("\nPrimary social organization")+
   ylab("Number of populations\n")+
   #scale_fill_manual(values = colors[1:5])+
@@ -148,10 +150,17 @@ ggplot(dfp, aes(x = cat, y = valh, alpha = 0.8)) +
 
 ggsave("figure1b_hist1.png", hist1, width = 6, height = 7)
 
-
-dfp2 = data.frame(value = df1$IVSO_prop)
+library(ggpattern)
+df1$pat = "x"
+df1[which(df1$Nbr_social_units==1),"pat"] = "m"
+dfp2 = data.frame(value = df1$IVSO_prop, pat = df1$pat)
 hist2 = 
-  ggplot(dfp2, aes(x = value)) + geom_histogram(binwidth = 0.05, fill = colors[6], color = "black")+
+  ggplot(dfp2, aes(x = value, pattern = pat)) + 
+           geom_histogram_pattern(binwidth = 0.05, fill = colors[6], color = "black", 
+                   pattern_fill = "black",
+                   pattern_angle = 45,
+                   pattern_density = 0.99,
+                   pattern_spacing = 0.01)+
   xlab("\nIntra-population variation in social organization (IVSO)")+
   ylab("Number of populations\n")+
     theme(legend.position = "top",
@@ -167,9 +176,11 @@ hist2 =
           panel.grid.major = element_blank(),
           panel.grid.minor = element_blank(),
           panel.spacing = unit(2, "lines"))+
-  guides( size = "none", fill = "none", alpha = "none")
+  guides( size = "none", fill = "none", alpha = "none")+
+  scale_pattern_manual(values = c(m = "stripe", x = "none"))+
+  guides(pattern = "none")
 
-library(cowplot)
+ library(cowplot)
 
 #combine
 f1b = plot_grid(hist1, hist2, align = "v", ncol = 1)
@@ -298,9 +309,8 @@ m.re1 = brm(formula = SO_m + IVSO_m + set_rescor(FALSE),
    round(Ndf_med[1,] - Ndf_med[2,], 3) #N5
    round(Ndf_med[1,] - Ndf_med[3,], 3) #N10
    #N5 -
-   round(Ndf_med[2,] - Ndf_med[3,], 3) #N10
+   round(Ndf_med[2,] - Ndf_med[3,], 3) #N5-N10
    #Absolute delta values remain < 0.01
-   
    
 
 ##############################################################
@@ -309,9 +319,9 @@ m.re1 = brm(formula = SO_m + IVSO_m + set_rescor(FALSE),
 
 #model formula
 SO_m = bf(SO_counts | trials(SO_tot) ~ 
-            1 + effort_wf + (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
+            1 + effort_wf + (1|gr(phylo, cov = A)) + (1|obs) )
 IVSO_m = bf(IVSOint | trials(SO_tot) ~ 
-            1 + effort_wf + (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
+            1 + effort_wf + (1|gr(phylo, cov = A)) + (1|obs))
 
 #create copy of dataframe for manipulation
 df1 = dataGR
@@ -338,19 +348,21 @@ rownames(f_mean) = f_mean$superfamily
 df1$effort_bf = as.vector(scale(f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
 df1$effort_wf = as.vector(scale(df1$Nbr_papers_for_each_field_sites - f_mean[df1$superfamily,"Nbr_papers_for_each_field_sites"] ))
 
+#hap. ancestor
+{
 #create data lists
-datal = rep(list(df1),5)
+datal = rep(list(df1[df1$superfamily %in% c("Tarsioidea", "Ceboidea", "Hominoidea", "Cercopithecoidea"), ]),5)
 phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
 phylol = lapply(phylol, ape::vcv, cor = TRUE)
 phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
               list(A = phylol[[3]]), list(A = phylol[[4]]),
               list(A = phylol[[5]]))
 
-#estimate model
 #remove backend code line if cmdstan is not installed
-m.superf = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+m.pred = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
           family = c(multinomial, binomial),
-          data = datal, data2 = phylol,
+          data = datal, 
+          data2 = phylol,
           prior = c(prior("normal(0,1)", class = "Intercept"),
                     prior("normal(0,1)", class = "b"),
                     prior("exponential(2)", class = "sd", resp = "IVSOint"),
@@ -361,31 +373,256 @@ m.superf = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE),
           backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
           warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
           control=list(adapt_delta=0.95, max_treedepth=10))
-
 #save
-saveRDS(m.superf, "m_superf.RDS")
-m.superf = readRDS("m_superf.RDS")
+saveRDS(m.pred, "m_anc_hp.RDS")
+}
+#strep. ancestor
+{
+#create data lists
+datal = rep(list(df1[df1$superfamily %in% c("Lorisoidea", "Lemuroidea"), ]),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
+
+#remove backend code line if cmdstan is not installed
+m.pred = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+          family = c(multinomial, binomial),
+          data = datal, 
+          data2 = phylol,
+          prior = c(prior("normal(0,1)", class = "Intercept"),
+                    prior("normal(0,1)", class = "b"),
+                    prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                    eval(parse(text=paste0("c(", 
+                    paste0(text="prior(\"exponential(2)\", 
+                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                    levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+          backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+          control=list(adapt_delta=0.95, max_treedepth=10))
+#save
+saveRDS(m.pred, "m_anc_stp.RDS")
+}
+#Lorisoidea
+{
+#create data lists
+datal = rep(list(df1[df1$superfamily %in% c("Lorisoidea"), ]),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
+
+#remove backend code line if cmdstan is not installed
+m.pred = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+          family = c(multinomial, binomial),
+          data = datal, 
+          data2 = phylol,
+          prior = c(prior("normal(0,1)", class = "Intercept"),
+                    prior("normal(0,1)", class = "b"),
+                    prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                    eval(parse(text=paste0("c(", 
+                    paste0(text="prior(\"exponential(2)\", 
+                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                    levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+          backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+          control=list(adapt_delta=0.95, max_treedepth=10))
+#save
+saveRDS(m.pred, "m_anc_lor.RDS")
+}
+#Lemuroidea
+{
+#create data lists
+datal = rep(list(df1[df1$superfamily %in% c("Lemuroidea"), ]),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
+
+#remove backend code line if cmdstan is not installed
+m.pred = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+          family = c(multinomial, binomial),
+          data = datal, 
+          data2 = phylol,
+          prior = c(prior("normal(0,1)", class = "Intercept"),
+                    prior("normal(0,1)", class = "b"),
+                    prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                    eval(parse(text=paste0("c(", 
+                    paste0(text="prior(\"exponential(2)\", 
+                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                    levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+          backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+          control=list(adapt_delta=0.95, max_treedepth=10))
+#save
+saveRDS(m.pred, "m_anc_lem.RDS")
+}
+#Tarsioidea
+{
+#create data lists
+datal = rep(list(df1[df1$superfamily %in% c("Tarsioidea"), ]),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
+
+#remove backend code line if cmdstan is not installed
+m.pred = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+          family = c(multinomial, binomial),
+          data = datal, 
+          data2 = phylol,
+          prior = c(prior("normal(0,1)", class = "Intercept"),
+                    prior("normal(0,1)", class = "b"),
+                    prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                    eval(parse(text=paste0("c(", 
+                    paste0(text="prior(\"exponential(2)\", 
+                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                    levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+          backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+          control=list(adapt_delta=0.95, max_treedepth=10))
+#save
+saveRDS(m.pred, "m_anc_tars.RDS")
+}
+#Ceboidea
+{
+#create data lists
+datal = rep(list(df1[df1$superfamily %in% c("Ceboidea"), ]),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
+
+#remove backend code line if cmdstan is not installed
+m.pred = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+          family = c(multinomial, binomial),
+          data = datal, 
+          data2 = phylol,
+          prior = c(prior("normal(0,1)", class = "Intercept"),
+                    prior("normal(0,1)", class = "b"),
+                    prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                    eval(parse(text=paste0("c(", 
+                    paste0(text="prior(\"exponential(2)\", 
+                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                    levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+          backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+          control=list(adapt_delta=0.95, max_treedepth=10))
+#save
+saveRDS(m.pred, "m_anc_ceb.RDS")
+}
+#Hominoidea
+{
+#create data lists
+datal = rep(list(df1[df1$superfamily %in% c("Hominoidea"), ]),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
+
+#remove backend code line if cmdstan is not installed
+m.pred = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+          family = c(multinomial, binomial),
+          data = datal, 
+          data2 = phylol,
+          prior = c(prior("normal(0,1)", class = "Intercept"),
+                    prior("normal(0,1)", class = "b"),
+                    prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                    eval(parse(text=paste0("c(", 
+                    paste0(text="prior(\"exponential(2)\", 
+                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                    levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+          backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+          control=list(adapt_delta=0.95, max_treedepth=10))
+#save
+saveRDS(m.pred, "m_anc_hom.RDS")
+}
+#Cerco
+{
+#create data lists
+datal = rep(list(df1[df1$superfamily %in% c("Cercopithecoidea"), ]),5)
+phylol = rep(list(A = trees[[sample(1:length(trees),1)]]),5)
+phylol = lapply(phylol, ape::vcv, cor = TRUE)
+phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
+              list(A = phylol[[3]]), list(A = phylol[[4]]),
+              list(A = phylol[[5]]))
+
+#remove backend code line if cmdstan is not installed
+m.pred = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+          family = c(multinomial, binomial),
+          data = datal, 
+          data2 = phylol,
+          prior = c(prior("normal(0,1)", class = "Intercept"),
+                    prior("normal(0,1)", class = "b"),
+                    prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                    eval(parse(text=paste0("c(", 
+                    paste0(text="prior(\"exponential(2)\", 
+                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                    levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+          backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+          warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+          control=list(adapt_delta=0.95, max_treedepth=10))
+#save
+saveRDS(m.pred, "m_anc_cerc.RDS")
+}
+
+#load ancestral state models for superfamilies and suborders
+m.anc.hp = readRDS("m_anc_hp.RDS")
+m.anc.stp = readRDS("m_anc_stp.RDS")
+m.anc.lor = readRDS("m_anc_lor.RDS")
+m.anc.lem = readRDS("m_anc_lem.RDS")
+m.anc.ceb = readRDS("m_anc_ceb.RDS")
+m.anc.hom = readRDS("m_anc_hom.RDS")
+m.anc.hom = readRDS("m_anc_hom.RDS")
+m.anc.cerc = readRDS("m_anc_cerc.RDS")
+
+#generate predictions
+predhp = data.frame(fitted(m.anc.hp, newdata = data.frame(phylo = NA, SO_tot = 1, 
+                                                           effort_wf = 0, obs = NA), summary = FALSE), grp = "Haplorhini")
+
+predstp = data.frame(fitted(m.anc.stp, newdata = data.frame(phylo = NA, SO_tot = 1, 
+                                                            effort_wf = 0, obs = NA), summary = FALSE), grp = "Strepsirrhini")
+
+predlor = data.frame(fitted(m.anc.lor, newdata = data.frame(phylo = NA, SO_tot = 1, 
+                                                            effort_wf = 0, obs = NA), summary = FALSE), grp = "Lorisoidea")
+
+predlem = data.frame(fitted(m.anc.lem, newdata = data.frame(phylo = NA, SO_tot = 1, 
+                                                            effort_wf = 0, obs = NA), summary = FALSE), grp = "Lemuroidea")
+
+predtars = data.frame(fitted(m.anc.tars, newdata = data.frame(phylo = NA, SO_tot = 1, 
+                                                            effort_wf = 0, obs = NA), summary = FALSE), grp = "Tarsioidea")
+
+predceb = data.frame(fitted(m.anc.ceb, newdata = data.frame(phylo = NA, SO_tot = 1, 
+                                                             effort_wf = 0, obs = NA), summary = FALSE), grp = "Ceboidea")
+
+
+predhom = data.frame(fitted(m.anc.hom, newdata = data.frame(phylo = NA, SO_tot = 1, 
+                                                             effort_wf = 0, obs = NA), summary = FALSE), grp = "Hominoidea")
+
+predcerc = data.frame(fitted(m.anc.cerc, newdata = data.frame(phylo = NA, SO_tot = 1, 
+                                                            effort_wf = 0, obs = NA), summary = FALSE), grp = "Cercopithecoidea")
+#combine predictions
+preds = rbind(predhp, predstp, predlor, predlem, predtars, predceb, predhom, predcerc)
+colnames(preds) = c("Solitary", "MF", "MFF", "FMM", "FFMM", "Overall IVSO", "group")
+predl = reshape2::melt(preds)
+predl$group = factor(predl$group, levels = c("Lemuroidea", "Lorisoidea", "Tarsioidea",
+                                                "Ceboidea", "Cercopithecoidea", "Hominoidea",
+                                                "Strepsirrhini", "Haplorhini") )
 
 #plot predictions
-names = unique(cbind(df1$Genus_species, df1$superfamily))
-pred = fitted(m.superf, newdata = data.frame(phylo = names[,1], Genus_species = names[,1], 
-                                             superfamily = names[,2], SO_tot = 1, effort_wf = 1),
-              re_formula = ~ (1|superfamily) + (1|gr(phylo, cov = A)), summary = FALSE)
-
-w.sf = reshape2::melt(pred)
-w.sf$sf = rep(names[,2], each = 20000)
-levels(w.sf$Var3)[levels(w.sf$Var3)=="IVSOint"] = "Overall IVSO"
-w.sf[is.na(w.sf$Var3),"Var3"] = "Overall IVSO"
-
-
 library(tidybayes)
+
 superf.p =
-ggplot(w.sf, aes(x = value, y = sf, color = sf))+
-  facet_wrap(.~ Var3)+
+ggplot(predl, aes(x = value, y = group))+
+  facet_wrap(.~ variable)+
   stat_pointinterval(.width = c(0.5, 0.9))+
-  stat_pointinterval(w.sf, mapping = aes(x = value, y = sf, group = Var2, color = sf),
-                     .width=0, position = position_jitter(), alpha = 0.2, size = 1)+
-  scale_color_manual(values = c("#0A2F51","#0E4D64","#137177","#188977","#1D9A6C","#39A96B"))+
   ylab(" ")+
   xlab("\nProbability for a social unit within an ancestral population")+
   theme(legend.position = "top",
@@ -404,7 +641,7 @@ ggplot(w.sf, aes(x = value, y = sf, color = sf))+
   guides( color = "none")
 
 #save
-save_plot("superfamily_fig 4.png", superf.p, base_height = 5, base_width = 8)
+save_plot("superfamily_fig 4.png", superf.p, base_height = 5, base_width = 8.5)
 save_plot("superfamily_fig 4.tiff", superf.p, base_height = 5, base_width = 8,
           compression = "lzw")
 
@@ -539,8 +776,15 @@ IVSO_m = bf(IVSOint | trials(SO_tot) ~
             1 + Activity_pattern + Locom +  logmean_bodysize + effort_wf +
             (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
 
+#for robustness check (simply change the model formula in the brms code below)
+IVSO_mz = bf(IVSOint | trials(SO_tot) ~
+            1 + Activity_pattern + Locom +  logmean_bodysize + effort_wf +
+            (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs),
+            zi ~ (1|gr(phylo, cov = A)))
+
 #create copy of dataframe for manipulation
 df1 = dataGR
+#df1 = dGRr #(use for robustness check without uncertain zeroes)
 
 #random phylo tree
 tree = trees[[sample(1:length(trees),1)]]
@@ -601,6 +845,47 @@ m.asr = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE),
 saveRDS(m.asr, "m_asr.RDS")
 m.asr = readRDS("m_asr.RDS")
 
+#robustness checks w/ consensus phylogeny
+
+#zero-inflation
+m.asrzi = brm(formula = SO_m + IVSO_mz + set_rescor(FALSE), 
+              family = c(multinomial, zero_inflated_binomial),
+              data = df1, data2 = list(A = vcv(c_tree, corr=TRUE)),
+              prior = c(prior("normal(0,1)", class = "Intercept"),
+                        prior("normal(0,1)", class = "b"),
+                        prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                        eval(parse(text=paste0("c(", 
+                                               paste0(text="prior(\"exponential(2)\", 
+                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                                                      levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+              backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+              warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+              control=list(adapt_delta=0.95, max_treedepth=10))
+
+#save
+saveRDS(m.asrzi, "m_asrzi.RDS")
+m.asrzi = readRDS("m_asrzi.RDS")
+
+#no false zeroes
+#make sure that df1 = dGRr is uncommented and run above
+m.asrnz = brm(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+                     family = c(multinomial, binomial),
+                     data = df1, data2 = list(A = vcv(c_tree, corr=TRUE)),
+                     prior = c(prior("normal(0,1)", class = "Intercept"),
+                               prior("normal(0,1)", class = "b"),
+                               prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                               eval(parse(text=paste0("c(", 
+                                                      paste0(text="prior(\"exponential(2)\", 
+                    class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                                                             levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+                     backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+                     warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+                     control=list(adapt_delta=0.95, max_treedepth=10))
+
+#save
+saveRDS(m.asrnz, "m_asrnz.RDS")
+m.asrnz = readRDS("m_asrnz.RDS")
+
 #summary of ASR predictions
 pred = fitted(m.asr, newdata = data.frame(effort_wf = 0, SO_tot = 1, Nbr_social_units = 1, Activity_pattern = "Nocturnal",
                                         Locom = "AR", logmean_bodysize = -2), re_formula = NA, robust = FALSE)
@@ -639,7 +924,6 @@ write.csv(round(diff.df,2),"asr_diff.csv")
 IVSO = 1 - pred$MF
 hist(IVSO)
 median(IVSO); quantile(IVSO, c(0.25, 0.95))
-
 
 ############################################################
 #plot results
@@ -810,8 +1094,18 @@ IVSO_m = bf(IVSOint | trials(Nbr_social_units) ~ 1 +
              logmean_bodysize + effort_wf + (1|superfamily) + 
              (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
 
+#for robustness check (simply change the model formula in the brms code below)
+IVSO_mz = bf(IVSOint | trials(Nbr_social_units) ~ 1 +
+             mo(Habitat_heterogenity) + Habitat_cat + 
+             foraging_style + Locom + Activity_pattern + 
+             fruitprop + folivprop + seedprop + animalprop +
+             logmean_bodysize + effort_wf + (1|superfamily) + 
+             (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs), 
+            zi ~ (1|gr(phylo, cov = A)))
+
 #create copy of dataframe for manipulation
 df1 = dataGR
+#df1 = dGRr (use for robustness check without uncertain zeroes)
 
 #random phylo tree
 tree = trees[[sample(1:length(trees),1)]]
@@ -876,7 +1170,8 @@ datal = lapply(datal, FUN = function(x) {
                   "Habitat_heterogenity","Habitat_cat",
                   "foraging_style","logmean_bodysize",
                   "Locom","Activity_pattern","fruitprop","folivprop",
-                  "flowerprop","seedprop","animalprop")], m = 1)) })
+                  "flowerprop","seedprop","animalprop")], m = 1)) 
+  })
 
 datal = lapply(datal, FUN = function(x) {x$SO_counts = with(x, cbind(Solitary, MF, MFF, FMM, FFMM))
                                          x$SO_tot = with(x, Solitary + MF + MFF + FMM + FFMM)
@@ -903,6 +1198,51 @@ m.full = readRDS("m_full.RDS")
 summary(m.full, robust = TRUE)
 full.fe = round(fixef(m.full, robust = TRUE, prob = c(0.05,0.95)),2)
 write.csv(full.fe, "full_fe.csv")
+
+
+#robustness checks w/ consensus phylogeny
+
+#zero-inflation
+m.fullzi = brm(formula = SO_m + IVSO_mz + set_rescor(FALSE), family = c(multinomial, zero_inflated_binomial),
+                      data = datal[[1]], data2 = list(A = vcv(c_tree, corr=TRUE)),
+                      prior = c(prior("normal(0,1)", class = "Intercept"),
+                                prior("normal(0,1)", class = "b"),
+                                prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                                eval(parse(text=paste0("c(", 
+                                                       paste0(text="prior(\"exponential(2)\", 
+                          class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                                                              levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+                      backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+                      warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+                      control=list(adapt_delta=0.95, max_treedepth=10))
+
+#save
+saveRDS(m.fullzi, "m_fullzi.RDS")
+m.fullzi = readRDS("m_fullzi.RDS")
+
+#no false zeroes
+#make sure that df1 = dGRr is uncommented and run above
+m.fullnz = brm(formula = SO_m + IVSO_mz + set_rescor(FALSE), family = c(multinomial, binomial),
+                        data = df1, data2 = list(A = vcv(c_tree, corr=TRUE)),
+                        prior = c(prior("normal(0,1)", class = "Intercept"),
+                                  prior("normal(0,1)", class = "b"),
+                                  prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                                  eval(parse(text=paste0("c(", 
+                                                         paste0(text="prior(\"exponential(2)\", 
+                          class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                                                                levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+                        backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+                        warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+                        control=list(adapt_delta=0.95, max_treedepth=10))
+
+#save
+saveRDS(m.fullnz, "m_fullnz.RDS")
+m.fullnz = readRDS("m_fullnz.RDS")
+
+
+
+
+
 
 #without imputation
 datal2 = rep(list(df1),5)
@@ -997,19 +1337,19 @@ full.mod1 <- rstan::sampling(mod_r, data=datal.stan[[1]], init=0, iter = n_iter,
                             chains = n_chains, cores = n_chains, control = list(adapt_delta=0.95, max_treedepth=10))
 saveRDS(full.mod1, "full_mod1.RDS")
 
-full.mod2 <- rstan::sampling(mod_r, data=datal.stan[[1]], init=0, iter = n_iter, warmup = n_warm,
+full.mod2 <- rstan::sampling(mod_r, data=datal.stan[[2]], init=0, iter = n_iter, warmup = n_warm,
                              chains = n_chains, cores = n_chains, control = list(adapt_delta=0.95, max_treedepth=10))
 saveRDS(full.mod2, "full_mod2.RDS")
 
-full.mod3 <- rstan::sampling(mod_r, data=datal.stan[[1]], init=0, iter = n_iter, warmup = n_warm,
+full.mod3 <- rstan::sampling(mod_r, data=datal.stan[[3]], init=0, iter = n_iter, warmup = n_warm,
                              chains = n_chains, cores = n_chains, control = list(adapt_delta=0.95, max_treedepth=10))
 saveRDS(full.mod3, "full_mod3.RDS")
 
-full.mod4 <- rstan::sampling(mod_r, data=datal.stan[[1]], init=0, iter = n_iter, warmup = n_warm,
+full.mod4 <- rstan::sampling(mod_r, data=datal.stan[[4]], init=0, iter = n_iter, warmup = n_warm,
                              chains = n_chains, cores = n_chains, control = list(adapt_delta=0.95, max_treedepth=10))
 saveRDS(full.mod4, "full_mod4.RDS")
 
-full.mod5 <- rstan::sampling(mod_r, data=datal.stan[[1]], init=0, iter = n_iter, warmup = n_warm,
+full.mod5 <- rstan::sampling(mod_r, data=datal.stan[[5]], init=0, iter = n_iter, warmup = n_warm,
                              chains = n_chains, cores = n_chains, control = list(adapt_delta=0.95, max_treedepth=10))
 saveRDS(full.mod5, "full_mod5.RDS")
 
@@ -1113,7 +1453,7 @@ library(tidybayes)
 
 cc <- scales::seq_gradient_pal("lightblue", "darkblue")(seq(0,1,length.out=5))
 
-R2.plot = 
+#R2.plot = 
   ggplot(ldf, aes(x = value, y = type, color = type, fill = type))+ 
   coord_cartesian(xlim=c(0,1))+
   stat_pointinterval(.width = c(0.90), size = 10, position = position_dodge(width = 0.5)) +
@@ -1210,6 +1550,36 @@ phylol = lapply(phylol, ape::vcv, cor = TRUE)
 phylol = list(list(A = phylol[[1]]), list(A = phylol[[2]]),
               list(A = phylol[[3]]), list(A = phylol[[4]]),
               list(A = phylol[[5]]))
+
+
+############################################################
+#research effort
+#model formula
+SO_m = bf(SO_counts | trials(SO_tot) ~ 
+            1 + effort_wf +
+            (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs) )
+IVSO_m = bf(IVSOint | trials(SO_tot) ~ 
+            1 + effort_wf + 
+            (1|superfamily) + (1|gr(phylo, cov = A)) + (1|Genus_species) + (1|obs))
+
+m.eff = brm_multiple(formula = SO_m + IVSO_m + set_rescor(FALSE), 
+            family = c(multinomial, binomial), data = datal, data2 = phylol,
+            prior = c(prior("normal(0,1)", class = "Intercept"),
+                      prior("normal(0,1)", class = "b"),
+                      prior("exponential(2)", class = "sd", resp = "IVSOint"),
+                      eval(parse(text=paste0("c(", 
+                      paste0(text="prior(\"exponential(2)\", 
+                      class = \"sd\", resp=\"SOcounts\", dpar=\"mu", 
+                      levels(as.factor(df1$Main1))[-5], "\")",collapse = ","), ")")))),
+            backend="cmdstanr", stan_model_args=list(stanc_options = list("O1")),
+            warmup = n_warm, iter=n_iter, chains = n_chains, inits = 0,
+            control=list(adapt_delta=0.95, max_treedepth=10))
+
+saveRDS(m.eff, "m_eff.RDS")
+m.eff = readRDS("m_eff.RDS")
+summary(m.eff, robust = TRUE)
+fixef(m.eff, robust = TRUE)
+
 
 ############################################################
 #activity
@@ -2059,4 +2429,6 @@ ggsave("forg_p3.png", forg.p3, width = 9, height = 3)
 
 #please email jordanscottmartin@gmail.com if you have any
 #questions or comments
+
+
 
