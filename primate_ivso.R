@@ -34,12 +34,16 @@ dataGR$phylo = dataGR$Genus_species
 
 #calculate % of species exhibiting MF and solitary primary SO
 dataGsp = dataG[dataG$sp.pop=="sp",] #subset to species-level rows
-length(unique(dataGsp[dataGsp$Main1=="MF" | dataGsp$Main2=="MF","Genus_species"])) / #% sp with primary SO being MF 
+length(unique(dataGsp[dataGsp$Main1=="MF" & dataGsp$Main2=="MF","Genus_species"])) / #% sp with primary SO being MF 
   length(unique(dataGsp$Genus_species))
-length(unique(dataGsp[dataGsp$Main1=="solitary" | dataGsp$Main2=="solitary","Genus_species"])) / #% sp with primary SO being solitary
+length(unique(dataGsp[dataGsp$Main1=="solitary" & dataGsp$Main2=="solitary","Genus_species"])) / #% sp with primary SO being solitary
   length(unique(dataGsp$Genus_species))
+
 #number of species with uncertain IVSO
 length(dataGsp[dataGsp$Nbr_social_units==1,"Genus_species"])
+
+#number of species showing IVSO
+length(unique(dataGsp[dataGsp$IVSO_prop>0,"Genus_species"])) / length(unique(dataGsp$Genus_species))
 
 #remove redundant species-level rows (analyses are conducted on population data)
 dataR = dataR[dataR$sp.pop=="pop",]
@@ -47,9 +51,9 @@ dataG = dataG[dataG$sp.pop=="pop",]
 dataGR = dataGR[dataGR$sp.pop=="pop",]
 
 #calculate % of populations exhibiting MF or solitary primary SO
-nrow(dataGR[dataGR$Main1=="MF" | dataGR$Main2=="MF",]) / #% pop with primary SO being MF 
+nrow(dataGR[dataGR$Main1=="MF" & dataGR$Main2=="MF",]) / #% pop with primary SO being MF 
   nrow(dataGR)
-nrow(dataGR[dataGR$Main1=="solitary" | dataGR$Main2=="solitary",]) / #% pop with primary SO being MF 
+nrow(dataGR[dataGR$Main1=="solitary" & dataGR$Main2=="solitary",]) / #% pop with primary SO being MF 
   nrow(dataGR)
 
 #solitary foragers showing solitary as primary SO
@@ -58,11 +62,10 @@ length(unique(dataGR[dataG$foraging_style=="solitary","Genus_species"]))
 nrow(dataGR[dataGR$foraging_style=="solitary" & dataGR$Main1=="solitary" | 
                       dataGR$foraging_style=="solitary" & dataGR$Main2=="solitary" ,]) #solitary foraging + solitary primary SO
 
-#% of populations and species showing IVSO
+#% of populations showing IVSO
 nrow(dataGR[dataGR$IVSO_prop>0,]) / nrow(dataGR)
-length(unique(dataGR[dataG$IVSO_prop>0,"Genus_species"])) / length(unique(dataGR$Genus_species))
 
-#load phylogenies
+  #load phylogenies
 #multiple to capture uncertainty
 library(ape)
 trees = read.nexus("vert phylo.nex")
