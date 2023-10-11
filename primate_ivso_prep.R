@@ -6,7 +6,7 @@ setwd(" ")
 
 #load dataset to get phylogeny setup
 #use R dataset (decision is arbitrary)
-data = read.csv("db_Rrev.csv")
+data = read.csv("db_R.csv")
 
 #remove species without main SO
 data = data[-which(grepl(" ",data$main_SO)), ]
@@ -40,25 +40,22 @@ data[data$Genus_species %in% name_change$original.names, "Genus_species"] =
 
 #check if any species lack phylogenetic data
 spp = unique(data$Genus_species)
-setdiff(spp, tree$tip.label)
+setdiff(spp, tree$tip.label) #should be 0
+setdiff(tree$tip.label, spp) #should be 0
+
 
 ######################################################################
 #final datasets for analysis
 
 #load data
-dataR = read.csv("db_Rrev.csv")
-dataG = read.csv("db_Grev.csv")
-dataGR = read.csv("db_GRrev.csv")
+dataR = read.csv("db_R.csv")
+dataG = read.csv("db_G.csv")
+dataGR = read.csv("db_GR.csv")
 
 #remove species without main SO (445 -> 223 sp)
 dataR = dataR[-which(grepl(" ",dataR$main_SO)), ]
 dataG = dataG[-which(grepl(" ",dataG$main_SO)), ]
 dataGR = dataGR[-which(grepl(" ",dataGR$main_SO)), ]
-
-#subset to population-level data
-dataR = dataR[dataR$sp.pop=="pop",]
-dataG = dataG[dataG$sp.pop=="pop",]
-dataGR = dataGR[dataGR$sp.pop=="pop",]
 
 #change species names to match phylogeny
 og_namesR = dataR$Genus_species[dataR$Genus_species %in% name_change$original.names]
@@ -123,4 +120,5 @@ dataGR$superfamily = fam$superfamily[match(dataGR$Genus_species, fam$updated_nam
 write.csv(dataR, "dataR.csv")
 write.csv(dataG, "dataG.csv")
 write.csv(dataGR, "dataGR.csv")
+
 
